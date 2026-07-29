@@ -1,0 +1,88 @@
+# 黑神话悟空 专属配置（M1：自动清小怪 + 自主寻路）
+# 坐标基于 1920x1080；HUD 区域坐标与键位为占位默认值，首次实机必须校准
+# （计划文档第 5 节假设 2/3；日志与 runs/<ts>/frames/ 关键帧可辅助校准）。
+
+window:
+  title: "黑神话：悟空"        # 截屏窗口定位用（Win32 FindWindowW）
+  # rect: [0, 0, 1920, 1080]   # 可选：手动指定截屏区域 [x, y, w, h]，跳过窗口定位
+
+perception:
+  base_resolution: [1920, 1080]
+  odometry:                    # 光流里程计（LK，CPU）
+    downscale: 0.5             # 降采样比例，控制 CPU 开销
+    max_corners: 200
+    quality_level: 0.01
+    min_distance: 8
+    yaw_per_pixel: 0.002       # 弧度 / 降采样像素（实机校准）
+    forward_per_pixel: 0.02    # 局部坐标单位 / 降采样像素（实机校准）
+    min_flow: 0.3              # 死区：中位流低于该值视为噪声
+    min_tracked: 20            # 有效跟踪点下限
+    fb_error: 1.0              # 前向-后向验证容差（降采样像素），过滤弱纹理虚假跟踪
+  walkable:                    # 可通行区域评估（画面下半地面分割）
+    roi_top_ratio: 0.55        # 只分析该比例以下的画面
+    ground_hsv_lower: [0, 0, 40]
+    ground_hsv_upper: [179, 90, 220]
+    edge_threshold: 80         # Canny 低阈值（高阈值取 2 倍）
+    straight_min_score: 0.35   # 中央扇区达到该分即可直行
+
+hud:
+  hp_bar:                      # 自身血条（红）
+    rect: [140, 1005, 400, 8]
+    hsv_lower: [0, 120, 80]
+    hsv_upper: [10, 255, 255]
+    column_fill: 0.3
+  stamina_bar:                 # 体力条（黄绿）
+    rect: [140, 1022, 360, 6]
+    hsv_lower: [35, 80, 80]
+    hsv_upper: [90, 255, 255]
+    column_fill: 0.3
+  enemy_hp_bar:                # 敌方血条（锁定/接战时出现）
+    rect: [660, 950, 600, 6]
+    hsv_lower: [0, 120, 80]
+    hsv_upper: [10, 255, 255]
+    column_fill: 0.25
+  gourd:                       # 葫芦（喝酒次数）图标
+    rect: [60, 985, 48, 48]
+    hsv_lower: [20, 100, 100]
+    hsv_upper: [40, 255, 255]
+    presence_ratio: 0.05
+  dead_indicator:              # 死亡画面提示（如"你已败北"亮色文字区域）
+    rect: [760, 400, 400, 120]
+    hsv_lower: [0, 0, 180]
+    hsv_upper: [179, 60, 255]
+    presence_ratio: 0.2
+
+combat:
+  heal_hp_threshold: 0.35      # 血量低于该值且有葫芦 → 喝药
+  engage_approach_ticks: 10    # 接战后接近 tick 数（近身判定占位，实机校准）
+  dodge_interval_ticks: 12     # 战斗固定节奏闪避间隔
+  dodge_on_hit_drop: 0.15      # 单 tick 血量跌幅达到该值判定为受击 → 闪避
+  enemy_lost_ticks: 8          # 敌方血条连续消失 tick 数 → 脱战
+  loot_wait_ticks: 20          # 掉落/脱战等待 tick 数
+  enemy_present_min: 0.02      # 敌方血条填充超过该值视为接敌
+
+keys:                          # 键位映射（用户自定义键位实机校准时填入）
+  move_forward: "w"
+  move_back: "s"
+  light_attack: "mouse_left"   # mouse_* 前缀表示鼠标按键
+  dodge: "space"
+  heal: "r"
+  lock_on: "mouse_middle"
+
+control:
+  pixels_per_degree: 12.0      # 鼠标像素 / 转角（实机校准）
+  move_hold_seconds: 0.35      # 移动键按住时长
+  action_pause: 0.05           # 每次输入后的间隔
+
+exploration:                   # 覆盖式探索参数
+  grid_size_m: 60.0            # 局部栅格边长（局部坐标单位）
+  grid_resolution: 0.5         # 栅格分辨率
+  lock_on_interval_ticks: 30   # 每 N tick 尝试一次锁定
+  stuck_window: 20             # 卡住判定窗口（tick 数）
+  stuck_distance: 0.5          # 窗口内位移小于该值视为卡住
+  unstick_turn_ticks: 6        # 脱困转向持续 tick 数
+  lookahead: 1.5               # 方向评分前瞻距离
+  turn_degrees: 30.0           # 单次转向角
+  align_degrees: 15.0          # 导航对齐容差
+  arrive_distance: 1.0         # 到达探索断点的判定距离
+  obstacle_score: 0.2          # 中央扇区评分低于该值时把正前方标记为障碍
