@@ -27,6 +27,7 @@
   - **WGC 的 API 假设只能实机验证**（构造签名、事件机制、BGRA 帧格式、start() 非阻塞），代码已带防御性报错
   - 实机联调修复（WGC 事件注册）：包强制要求同时注册 `on_frame_arrived` 与 `on_closed`，缺后者 start() 报 "on_closed Event Handler Is Not Set"；已补 on_closed 处理器及捕获关闭后的明确报错（`core/perception/wgc_source.py`，新增 `tests/test_wgc_source.py` 伪造包覆盖该路径）
   - 实机联调修复（WGC 阻塞式 start）：v1.x 的 `start()` 在调用线程跑捕获循环（现象：捕获边框亮起后程序卡死），改为守护线程承载 + 线程内异常转交主线程；窗口标题匹配忽略首尾空格（配置 "b1  " 手误场景）
+  - 实机联调新增（输入链路诊断 `--probe-input`）：实机反馈"只前进、视角不转"。turn 由合成鼠标相对移动（`pdi.moveRel`）实现，move 由键盘实现——两条输入路径需分别验证。新增 `apps/auto_player/probe.py`：倒计时后逐个动作发真实输入并播报，用于区分"决策没发 turn"（查 session.log 有无 action turn 行）与"合成鼠标移动被游戏忽略"（probe 的转向也不生效）两类根因。根因待用户 probe 反馈后定位，**未定性**
 
 ## 下一步动作
 

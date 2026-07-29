@@ -178,6 +178,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--calibrate", action="store_true",
                         help="HUD 校准：抓一帧，输出整图标注/区域裁剪/测量值到 "
                              "runs/<timestamp>/calib/ 后退出（不发输入）")
+    parser.add_argument("--probe-input", action="store_true",
+                        help="输入链路诊断：倒计时后逐个动作发送真实输入并播报"
+                             "（确认哪些动作在游戏内实际生效，定位输入问题）")
     args = parser.parse_args(argv)
 
     if args.list_windows:
@@ -210,10 +213,29 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.calibrate:
             return run_calibrate_cli(settings, args.game, game_config)
+        if args.probe_input:
+            return run_probe_cli(args.game, game_config)
         return run(settings, args.game, game_config, max_ticks=args.max_ticks, dry_run=args.dry_run)
     except RuntimeError as exc:
         # 截屏后端/窗口定位等启动失败：明确报错，不给 traceback
         raise SystemExit(f"[auto_player] 启动失败: {exc}") from exc
+
+
+def run_probe_cli(game: str, game_config_path: Path) -> int:
+    """--probe-input 入口：逐动作发送真实输入，用户对照游戏画面确认生效情况。"""
+    if game != "wukong":
+        raise SystemExit(f"未知游戏适配器: {game}（M1 仅支持 wukong）")
+    from apps.auto_player.probe import run_probe
+    from core.control.directinput import DirectInputController
+    from core.perception.foreground import bring_to_foreground
+    from games.wukong.adapter import WukongConfig
+
+    config = WukongConfig.load(game_config_path)
+    foregrounded = bring_to_foreground(config.window.title)
+    print(f"[probe] 游戏窗口提前台: {'成功' if foregrounded else '失败（倒计时内请手动切换到游戏）'}")
+    controller = DirectInputController(config.keys, config.control)
+    run_probe(controller)
+    return 0
 
 
 def run_calibrate_cli(settings: Settings, game: str, game_config_path: Path) -> int:
