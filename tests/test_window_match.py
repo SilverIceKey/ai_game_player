@@ -15,6 +15,11 @@ class TestMatchWindowTitle:
     def test_exact_match_case_insensitive(self):
         assert match_window_title("B1", self.TITLES) == "b1"
 
+    def test_surrounding_whitespace_ignored(self):
+        # 配置手误带尾随空格（实机发生："b1  "）仍能命中
+        assert match_window_title("b1  ", self.TITLES) == "b1"
+        assert match_window_title("  b1", self.TITLES) == "b1"
+
     def test_substring_fallback(self):
         assert match_window_title("visual studio", self.TITLES) == "Visual Studio Code"
 

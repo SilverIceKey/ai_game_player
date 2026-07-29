@@ -12,16 +12,17 @@ import numpy as np
 
 
 def match_window_title(query: str, titles: list[str]) -> str | None:
-    """在窗口标题列表中查找匹配项：先精确（忽略大小写），再包含匹配。
+    """在窗口标题列表中查找匹配项：先精确（忽略大小写与首尾空格），再包含匹配。
 
     纯函数，平台无关，供单元测试覆盖匹配策略。
+    忽略首尾空格：配置手误（如 "b1  "）或标题带不可见空格时不致匹配失败。
     """
-    exact = query.casefold()
+    exact = query.strip().casefold()
     for title in titles:
-        if title.casefold() == exact:
+        if title.strip().casefold() == exact:
             return title
     for title in titles:
-        if exact in title.casefold():
+        if exact in title.strip().casefold():
             return title
     return None
 
