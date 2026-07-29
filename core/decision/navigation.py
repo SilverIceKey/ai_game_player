@@ -29,6 +29,8 @@ class ExplorationParams:
     align_degrees: float = 15.0  # 导航对齐容差：航向偏差小于该值即可前进
     arrive_distance: float = 1.0  # 到达目标点的判定距离
     obstacle_score: float = 0.2  # 中央扇区评分低于该值时把正前方标记为障碍
+    switch_margin: float = 0.15  # 转向迟滞：侧向评分需优于正前方该幅度才转向（抗评分噪声）
+    turn_commit_ticks: int = 3  # 航向承诺：选定转向方向后持续 N tick 不再改判（抗左右摇摆）
 
 
 class CoverageExplorer:
@@ -38,6 +40,8 @@ class CoverageExplorer:
         self._tick = 0
         self._recent: deque[tuple[float, float]] = deque(maxlen=self.params.stuck_window)
         self._unstick_left = 0
+        self._commit_dir: str | None = None  # 航向承诺中的转向方向
+        self._commit_ticks = 0
 
     def decide(
         self,
@@ -80,26 +84,48 @@ class CoverageExplorer:
     # ---------- 内部 ----------
 
     def _explore(self, pose: tuple[float, float, float], walkable: WalkableResult) -> Action:
-        """覆盖式漫游：扇区评分 × 未探索加权，选最优方向。"""
+        """覆盖式漫游：扇区评分 × 未探索加权，选最优方向。
+
+        抗摇摆（实机反馈"转半天又转回来"）：
+        - 迟滞：侧向评分须优于正前方 switch_margin 才转向，评分噪声不改判
+        - 航向承诺：选定转向后持续 turn_commit_ticks，期间不再重新选边
+        """
         p = self.params
         x, y, theta = pose
-        candidates = (
+
+        # 航向承诺期内：沿原方向继续转；正前方明显更优则提前释放回直行
+        if self._commit_dir is not None:
+            self._commit_ticks -= 1
+            release = walkable.center >= max(walkable.left, walkable.right) + p.switch_margin
+            if self._commit_ticks <= 0 or release:
+                self._commit_dir = None
+            else:
+                return Action("turn", {"direction": self._commit_dir, "degrees": p.turn_degrees})
+
+        scores: dict[str, float] = {}
+        for name, sector, offset in (
             ("left", walkable.left, -math.radians(45.0)),
             ("straight", walkable.center, 0.0),
             ("right", walkable.right, math.radians(45.0)),
-        )
-        best_dir, best_score = "straight", -1.0
-        for name, sector, offset in candidates:
+        ):
             ax, ay = self.grid.point_ahead(x, y, theta + offset, p.lookahead)
-            score = sector / (1.0 + self.grid.visit_count(ax, ay))
-            if score > best_score:
-                best_dir, best_score = name, score
-        if best_score <= 0.0:
+            scores[name] = sector / (1.0 + self.grid.visit_count(ax, ay))
+
+        straight = scores["straight"]
+        side_dir = "left" if scores["left"] >= scores["right"] else "right"
+        side = scores[side_dir]
+
+        if straight <= 0.0 and side <= 0.0:
             # 三个方向均不可通行：原地转向扫描
             return Action("turn", {"direction": "right", "degrees": p.turn_degrees})
-        if best_dir == "straight":
+        if side > straight + p.switch_margin:
+            self._commit_dir = side_dir
+            self._commit_ticks = p.turn_commit_ticks
+            return Action("turn", {"direction": side_dir, "degrees": p.turn_degrees})
+        if straight > 0.0:
             return Action("move", {"direction": "forward"})
-        return Action("turn", {"direction": best_dir, "degrees": p.turn_degrees})
+        # 正前方不可通行且侧向优势不足迟滞阈值：仍向较优侧转（不入承诺）
+        return Action("turn", {"direction": side_dir, "degrees": p.turn_degrees})
 
     def _navigate_to(
         self,

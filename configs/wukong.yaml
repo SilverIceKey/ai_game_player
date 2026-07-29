@@ -76,6 +76,8 @@ control:
   pixels_per_degree: 12.0      # 鼠标像素 / 转角（实机校准）
   move_hold_seconds: 0.35      # 移动键按住时长
   action_pause: 0.05           # 每次输入后的间隔
+  turn_degrees_per_second: 180.0  # 转向角速度（度/秒）：转向按该速度拆小步平滑执行，越大越快
+  turn_step_interval: 0.02     # 平滑转向的步进间隔（秒）
 
 exploration:                   # 覆盖式探索参数
   grid_size_m: 60.0            # 局部栅格边长（局部坐标单位）
@@ -87,6 +89,8 @@ exploration:                   # 覆盖式探索参数
   lookahead: 1.5               # 方向评分前瞻距离
   turn_degrees: 30.0           # 单次转向角
   align_degrees: 15.0          # 导航对齐容差
+  switch_margin: 0.15          # 转向迟滞：侧向评分需优于正前方该幅度才转向（抗噪声摇摆）
+  turn_commit_ticks: 3         # 航向承诺：选定转向方向后持续 N tick 不再改判
   arrive_distance: 1.0         # 到达探索断点的判定距离
   obstacle_score: 0.2          # 中央扇区评分低于该值时把正前方标记为障碍
 

@@ -18,6 +18,8 @@ class ControlParams:
     pixels_per_degree: float = 12.0  # 鼠标像素 / 转角（实机校准）
     move_hold_seconds: float = 0.35  # 移动键按住时长
     action_pause: float = 0.05  # 每次输入后的间隔，避免输入洪峰
+    turn_degrees_per_second: float = 180.0  # 转向角速度（度/秒），平滑转向用
+    turn_step_interval: float = 0.02  # 平滑转向的步进间隔（秒）
 
 
 class DirectInputController:
@@ -64,7 +66,7 @@ class DirectInputController:
         elif name == "turn":
             degrees = float(action.params.get("degrees", 0.0))
             sign = -1.0 if action.params.get("direction") == "left" else 1.0
-            pdi.moveRel(int(round(degrees * p.pixels_per_degree * sign)), 0, relative=True)
+            self._smooth_turn(pdi, degrees * sign)
         elif name in ("light_attack", "dodge", "heal", "lock_on"):
             self._tap(pdi, self.keymap[name])
         else:
@@ -72,6 +74,27 @@ class DirectInputController:
         if p.action_pause > 0:
             time.sleep(p.action_pause)
         return Result(True, name)
+
+    def _smooth_turn(self, pdi, signed_degrees: float) -> None:
+        """线性平滑转向：按角速度把总像素拆成小步 moveRel，步间 sleep。
+
+        一次性 moveRel 整段像素在游戏中表现为镜头猛甩（实机反馈"跳转"），
+        拆步后接近真人甩鼠标的连续转动。像素取整的残差逐步累积，总量精确。
+        """
+        p = self.params
+        total_px = signed_degrees * p.pixels_per_degree
+        duration = abs(signed_degrees) / max(p.turn_degrees_per_second, 1e-6)
+        steps = max(1, int(round(duration / p.turn_step_interval)))
+        per_step = total_px / steps
+        acc = 0.0
+        for i in range(steps):
+            acc += per_step
+            whole = int(round(acc))
+            if whole != 0:
+                pdi.moveRel(whole, 0, relative=True)
+                acc -= whole
+            if i < steps - 1:
+                time.sleep(p.turn_step_interval)
 
     @staticmethod
     def _tap(pdi, key: str) -> None:
