@@ -150,7 +150,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="全自动游戏 AI（仅截屏 + 模拟输入，不读内存不注入）"
     )
-    parser.add_argument("--game", required=True, help="游戏适配器名，如 wukong")
+    parser.add_argument("--game", default=None, help="游戏适配器名，如 wukong")
+    parser.add_argument("--list-windows", action="store_true",
+                        help="列出当前所有可见窗口标题与区域后退出"
+                             "（校准 configs/<game>.yaml 的 window.title 用，无需 --game）")
     parser.add_argument("--config", default="configs/settings.yaml", help="全局配置文件路径")
     parser.add_argument("--game-config", default=None,
                         help="游戏专属配置路径，缺省 configs/<game>.yaml")
@@ -163,6 +166,20 @@ def main(argv: list[str] | None = None) -> int:
                         help="HUD 校准：抓一帧，输出整图标注/区域裁剪/测量值到 "
                              "runs/<timestamp>/calib/ 后退出（不发输入）")
     args = parser.parse_args(argv)
+
+    if args.list_windows:
+        from core.perception.mss_source import list_visible_windows
+
+        try:
+            windows = list_visible_windows()
+        except RuntimeError as exc:
+            raise SystemExit(f"[auto_player] {exc}") from exc
+        for title, rect in windows:
+            print(f"{title!r}\t{rect}")
+        return 0
+
+    if not args.game:
+        parser.error("缺少 --game（--list-windows 模式除外）")
 
     config_path = Path(args.config)
     if not config_path.is_file():

@@ -18,6 +18,7 @@
 - 校准方式（用户质疑后重做）：`--calibrate` 抓一帧输出整图标注（区域画框+标签）+ 每区域裁剪小图 + 测量值，用户"看图对不对"即可，不用手量像素；套错改 yaml 重跑确认
 - `--dry-run` 用 NullController 替换真实输入，完整链路照跑（日志/JSONL/抽样落帧），首行日志标注 dry_run=true
 - HUD 区域坐标、HSV 阈值、`yaw_per_pixel` 等仍为占位默认值，**首次实机必须用 --calibrate 校准**
+- 实机联调修复（窗口定位）：`FindWindowW` 精确匹配失败即盲报 → 改为枚举可见窗口（先精确后包含匹配），报错列出全部可见窗口标题；新增 `--list-windows` 命令直接查看窗口列表（`core/perception/mss_source.py`、`apps/auto_player/main.py`）
 
 ## 下一步动作
 
@@ -42,5 +43,5 @@
 
 ## 验证
 
-- 已执行：`pytest` 55 passed（含 dry-run 装配、NullController 不发输入、calibrate 标注/裁剪/测量输出）；`compileall` 通过；`--help` 显示新参数；Linux 下 `--calibrate` 无窗口时报错干净（无 traceback）
+- 已执行：`pytest` 61 passed（含 dry-run 装配、NullController 不发输入、calibrate 标注/裁剪/测量输出、窗口标题匹配策略、--list-windows 报错路径）；`compileall` 通过；`--help` 显示新参数；Linux 下 `--calibrate`/`--list-windows` 无窗口时报错干净（无 traceback）
 - 未执行：Windows 实机验证（环境不具备）

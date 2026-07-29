@@ -3,7 +3,7 @@
 # （计划文档第 5 节假设 2/3；日志与 runs/<ts>/frames/ 关键帧可辅助校准）。
 
 window:
-  title: "黑神话：悟空"        # 截屏窗口定位用（Win32 FindWindowW）
+  title: "黑神话：悟空"        # 截屏窗口定位用（枚举可见窗口，先精确后包含匹配；用 --list-windows 查看实际标题）
   # rect: [0, 0, 1920, 1080]   # 可选：手动指定截屏区域 [x, y, w, h]，跳过窗口定位
 
 perception:
