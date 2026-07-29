@@ -13,6 +13,7 @@ dependencies = [
     "opencv-python-headless",
     "pydirectinput",
     "pyyaml",
+    "windows-capture>=1.5,<2; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

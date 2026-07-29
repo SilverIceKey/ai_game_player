@@ -29,6 +29,7 @@
 
 - HUD 区域坐标、HSV 阈值、键位、`yaw_per_pixel` 为占位默认值，实机必须 `--calibrate` 校准
 - 光流漂移、复杂材质地面分割、2070s CPU 占用、标注图标签可读性均未实机验证
+- 截屏后端 `window.capture_backend: auto`（WGC 优先降级 mss）；windows-capture 的 API 假设（构造签名/事件/帧格式/start 非阻塞）未实机验证，实机首测用 `--dry-run --max-ticks 100` 看 runs/<ts>/frames/ 样本
 - 实机操作路径见 `docs/progress/PROGRESS-20260729-m1-implementation-v1.md` 下一步动作
 
 ## 下一步

@@ -31,10 +31,15 @@ from core.perception.walkable import WalkableAnalyzer, WalkableParams
 _REQUIRED_KEYS = ("move_forward", "light_attack", "dodge", "heal", "lock_on")
 
 
+_CAPTURE_BACKENDS = ("auto", "mss", "wgc")
+
+
 @dataclass(frozen=True)
 class WindowConfig:
     title: str
     rect: tuple[int, int, int, int] | None = None  # 手动指定截屏区域，跳过窗口定位
+    capture_backend: str = "auto"  # 截屏后端：auto（WGC 优先降级 mss）/ mss / wgc
+    foreground_on_start: bool = True  # 正式跑（非 dry-run/calibrate）启动时把游戏窗口提前台
 
 
 @dataclass(frozen=True)
@@ -88,9 +93,18 @@ class WukongConfig:
     def from_dict(cls, data: dict[str, Any]) -> WukongConfig:
         window = require(data, "window", "")
         rect = window.get("rect") if isinstance(window, dict) else None
+        backend = window.get("capture_backend", "auto") if isinstance(window, dict) else "auto"
+        if backend not in _CAPTURE_BACKENDS:
+            raise ConfigError(
+                f"window.capture_backend 非法: {backend!r}（仅支持 {'/'.join(_CAPTURE_BACKENDS)}）"
+            )
         window_cfg = WindowConfig(
             title=str(require(window, "title", "window")),
             rect=_rect4(rect, "window.rect") if rect is not None else None,
+            capture_backend=str(backend),
+            foreground_on_start=(
+                bool(window.get("foreground_on_start", True)) if isinstance(window, dict) else True
+            ),
         )
 
         perception = data.get("perception") or {}

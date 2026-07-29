@@ -68,7 +68,7 @@ def build_wukong(game_config_path: Path, dry_run: bool = False):
     from core.control.null_controller import NullController
     from core.decision.navigation import CoverageExplorer
     from core.navigation.grid_map import OccupancyGrid
-    from core.perception.mss_source import WindowFrameSource
+    from core.perception.source_factory import build_frame_source
     from games.wukong.adapter import WukongAdapter, WukongConfig
     from games.wukong.combat import CombatDecision
 
@@ -78,7 +78,7 @@ def build_wukong(game_config_path: Path, dry_run: bool = False):
     explorer = CoverageExplorer(grid, config.exploration)
     decision = CombatDecision(config, explorer, grid)
     controller = NullController() if dry_run else DirectInputController(config.keys, config.control)
-    source = WindowFrameSource(config.window.title, rect=config.window.rect)
+    source = build_frame_source(config.window)
     return source, adapter, decision, controller, config
 
 
@@ -100,6 +100,19 @@ def run(settings: Settings, game: str, game_config_path: Path, max_ticks: int = 
     logger.info("[%s] session start game=%s fps=%g dry_run=%s run_dir=%s",
                 datetime.now().strftime("%H:%M:%S.%f")[:-3], game, settings.runtime.fps,
                 "true" if dry_run else "false", run_dir)
+
+    # 正式跑（非 dry-run）启动时把游戏窗口提前台（mss 屏幕区域截屏必需；
+    # dry-run / calibrate 不发输入，没必要抢焦点）
+    if not dry_run and game_config.window.foreground_on_start:
+        from core.perception.foreground import bring_to_foreground
+
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        if bring_to_foreground(game_config.window.title):
+            logger.info("[%s] foreground: 游戏窗口已提前台", ts)
+        else:
+            logger.info("[%s] foreground: 未能把游戏窗口提前台"
+                        "（非 Windows 或未找到窗口/被系统拦截）；"
+                        "使用 mss 后端时请手动切到游戏窗口", ts)
 
     tick = 0
     prev_fsm = decision.state_name
@@ -194,9 +207,13 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings(config_path)
 
     game_config = Path(args.game_config) if args.game_config else Path(f"configs/{args.game}.yaml")
-    if args.calibrate:
-        return run_calibrate_cli(settings, args.game, game_config)
-    return run(settings, args.game, game_config, max_ticks=args.max_ticks, dry_run=args.dry_run)
+    try:
+        if args.calibrate:
+            return run_calibrate_cli(settings, args.game, game_config)
+        return run(settings, args.game, game_config, max_ticks=args.max_ticks, dry_run=args.dry_run)
+    except RuntimeError as exc:
+        # 截屏后端/窗口定位等启动失败：明确报错，不给 traceback
+        raise SystemExit(f"[auto_player] 启动失败: {exc}") from exc
 
 
 def run_calibrate_cli(settings: Settings, game: str, game_config_path: Path) -> int:
@@ -204,12 +221,12 @@ def run_calibrate_cli(settings: Settings, game: str, game_config_path: Path) -> 
     if game != "wukong":
         raise SystemExit(f"未知游戏适配器: {game}（M1 仅支持 wukong）")
     from apps.auto_player.calibrate import run_calibrate
-    from core.perception.mss_source import WindowFrameSource
+    from core.perception.source_factory import build_frame_source
     from games.wukong.adapter import WukongConfig
 
     config = WukongConfig.load(game_config_path)
-    source = WindowFrameSource(config.window.title, rect=config.window.rect)
     try:
+        source = build_frame_source(config.window)
         out_dir = run_calibrate(config, source, settings.recorder.output_dir)
     except Exception as exc:
         raise SystemExit(

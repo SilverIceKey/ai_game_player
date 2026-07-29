@@ -19,6 +19,12 @@
 - `--dry-run` 用 NullController 替换真实输入，完整链路照跑（日志/JSONL/抽样落帧），首行日志标注 dry_run=true
 - HUD 区域坐标、HSV 阈值、`yaw_per_pixel` 等仍为占位默认值，**首次实机必须用 --calibrate 校准**
 - 实机联调修复（窗口定位）：`FindWindowW` 精确匹配失败即盲报 → 改为枚举可见窗口（先精确后包含匹配），报错列出全部可见窗口标题；新增 `--list-windows` 命令直接查看窗口列表（`core/perception/mss_source.py`、`apps/auto_player/main.py`）
+- 实机联调新增（后台截屏 + 自动提前台）：
+  - `core/perception/wgc_source.py`：基于 `windows-capture`（Windows.Graphics.Capture）的窗口内容截屏，窗口被遮挡/在后台也能抓到游戏画面；异步回调用最新帧缓冲适配同步 grab()
+  - `core/perception/source_factory.py`：截屏后端选择（`window.capture_backend: auto/mss/wgc`），auto = WGC 优先失败降级 mss；calibrate 同享
+  - `core/perception/foreground.py`：正式跑启动时自动把游戏窗口提到前台（`window.foreground_on_start`）；DirectInput 输入只进前台窗口，这是硬限制
+  - 新依赖 `windows-capture>=1.5,<2; sys_platform == 'win32'`（平台标记，Linux 不装）
+  - **WGC 的 API 假设只能实机验证**（构造签名、事件机制、BGRA 帧格式、start() 非阻塞），代码已带防御性报错
 
 ## 下一步动作
 
@@ -43,5 +49,5 @@
 
 ## 验证
 
-- 已执行：`pytest` 61 passed（含 dry-run 装配、NullController 不发输入、calibrate 标注/裁剪/测量输出、窗口标题匹配策略、--list-windows 报错路径）；`compileall` 通过；`--help` 显示新参数；Linux 下 `--calibrate`/`--list-windows` 无窗口时报错干净（无 traceback）
-- 未执行：Windows 实机验证（环境不具备）
+- 已执行：`pytest` 71 passed（含 dry-run 装配、NullController 不发输入、calibrate 标注/裁剪/测量输出、窗口标题匹配策略、--list-windows 报错路径、截屏后端选择与降级、foreground 非 Windows 行为）；`compileall` 通过；`--help` 显示新参数；Linux 下 `--calibrate`/`--list-windows` 无窗口时报错干净（无 traceback）
+- 未执行：Windows 实机验证（环境不具备），特别是 windows-capture 的 API 假设（构造签名/事件/BGRA 帧格式/start 非阻塞）
