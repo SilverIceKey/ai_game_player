@@ -4,6 +4,7 @@
 缺 on_closed 时 start() 报 "on_closed Event Handler Is Not Set"。
 """
 import sys
+import threading
 import types
 
 import numpy as np
@@ -23,7 +24,7 @@ class _FakeCapture:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.handlers = {}
-        self.push_mode = "frame"  # frame / closed / nothing
+        self.push_mode = "frame"  # frame / closed / nothing / block / raise
 
     def event(self, fn):
         self.handlers[fn.__name__] = fn
@@ -39,6 +40,11 @@ class _FakeCapture:
             self.handlers["on_frame_arrived"](_FakeFrame(buf), None)
         elif self.push_mode == "closed":
             self.handlers["on_closed"]()
+        elif self.push_mode == "block":
+            # 实机行为：start() 阻塞（在调用线程跑捕获循环）
+            threading.Event().wait()
+        elif self.push_mode == "raise":
+            raise RuntimeError("模拟 start() 内部抛错")
 
 
 @pytest.fixture
@@ -86,4 +92,20 @@ def test_first_frame_timeout(fake_wc):
     source = WgcFrameSource("b1", first_frame_timeout=0.05)
     fake_wc["capture"].push_mode = "nothing"
     with pytest.raises(RuntimeError, match="首帧超时"):
+        source.grab()
+
+
+def test_blocking_start_does_not_freeze_caller(fake_wc):
+    """start() 阻塞（实机行为）时调用方不卡死：守护线程承载，走首帧超时路径。"""
+    source = WgcFrameSource("b1", first_frame_timeout=0.05)
+    fake_wc["capture"].push_mode = "block"
+    with pytest.raises(RuntimeError, match="首帧超时"):
+        source.grab()
+
+
+def test_start_internal_error_propagates(fake_wc):
+    """start() 在守护线程内抛错时，主线程拿到明确 RuntimeError 而不是挂起。"""
+    source = WgcFrameSource("b1", first_frame_timeout=5.0)
+    fake_wc["capture"].push_mode = "raise"
+    with pytest.raises(RuntimeError, match="内部抛错"):
         source.grab()

@@ -55,6 +55,7 @@ class WgcFrameSource:
         self._latest: np.ndarray | None = None
         self._closed = False
         self._started = False
+        self._start_error: BaseException | None = None
 
         try:
             @self._capture.event
@@ -84,30 +85,50 @@ class WgcFrameSource:
         )
 
     def start(self) -> None:
-        """启动捕获并阻塞等待首帧（带超时）。幂等；超时抛明确错误。"""
+        """启动捕获并阻塞等待首帧（带超时）。幂等；超时抛明确错误。
+
+        实机验证：windows-capture v1.x 的 start() 是阻塞式的（在调用线程
+        跑捕获循环，表现为"边框亮起后程序卡死"），必须放守护线程执行。
+        """
         if self._started:
             return
-        try:
-            self._capture.start()
-        except TypeError as exc:
-            raise RuntimeError(self._api_error(f"start() 调用不符: {exc}")) from exc
+
+        def _run() -> None:
+            try:
+                self._capture.start()
+            except Exception as exc:  # 线程内异常转交主线程（wait 路径统一抛）
+                with self._cond:
+                    self._start_error = exc
+                    self._cond.notify_all()
+
+        thread = threading.Thread(target=_run, daemon=True, name="wgc-capture")
+        thread.start()
+
         with self._cond:
-            if self._latest is None and not self._closed:
-                arrived = self._cond.wait_for(
-                    lambda: self._latest is not None or self._closed,
+            if self._latest is None and not self._closed and self._start_error is None:
+                self._cond.wait_for(
+                    lambda: (
+                        self._latest is not None
+                        or self._closed
+                        or self._start_error is not None
+                    ),
                     timeout=self.first_frame_timeout,
                 )
-                if not arrived:
-                    raise RuntimeError(
-                        f"WGC 首帧超时（{self.first_frame_timeout:g}s）: "
-                        f"窗口 {self.window_title!r} 未抓到画面"
-                        "（窗口不存在/被最小化，或包 API 不符；"
-                        "可用 --list-windows 核对窗口标题）"
-                    )
+            if self._start_error is not None:
+                raise RuntimeError(
+                    self._api_error(f"start() 内部抛错: {self._start_error}")
+                ) from self._start_error
             if self._closed and self._latest is None:
                 raise RuntimeError(
                     f"WGC 捕获在首帧前被关闭: 窗口 {self.window_title!r}"
                     "（窗口可能已关闭，可用 --list-windows 核对）"
+                )
+            if self._latest is None:
+                raise RuntimeError(
+                    f"WGC 首帧超时（{self.first_frame_timeout:g}s）: "
+                    f"窗口 {self.window_title!r} 未抓到画面"
+                    "（窗口不存在/被最小化，或包 API 不符；"
+                    "可用 --list-windows 核对窗口标题）"
                 )
         self._started = True
 

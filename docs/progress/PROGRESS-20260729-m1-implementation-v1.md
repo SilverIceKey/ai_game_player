@@ -26,6 +26,7 @@
   - 新依赖 `windows-capture>=1.5,<2; sys_platform == 'win32'`（平台标记，Linux 不装）
   - **WGC 的 API 假设只能实机验证**（构造签名、事件机制、BGRA 帧格式、start() 非阻塞），代码已带防御性报错
   - 实机联调修复（WGC 事件注册）：包强制要求同时注册 `on_frame_arrived` 与 `on_closed`，缺后者 start() 报 "on_closed Event Handler Is Not Set"；已补 on_closed 处理器及捕获关闭后的明确报错（`core/perception/wgc_source.py`，新增 `tests/test_wgc_source.py` 伪造包覆盖该路径）
+  - 实机联调修复（WGC 阻塞式 start）：v1.x 的 `start()` 在调用线程跑捕获循环（现象：捕获边框亮起后程序卡死），改为守护线程承载 + 线程内异常转交主线程；窗口标题匹配忽略首尾空格（配置 "b1  " 手误场景）
 
 ## 下一步动作
 
