@@ -118,6 +118,8 @@ def run(settings: Settings, game: str, game_config_path: Path, max_ticks: int = 
     prev_fsm = decision.state_name
     saved_first_combat = False
     frame_interval = game_config.dry_run.frame_interval_ticks
+    review_cfg = settings.review
+    prev_hp: float | None = None
     try:
         while True:
             started = time.monotonic()
@@ -127,10 +129,12 @@ def run(settings: Settings, game: str, game_config_path: Path, max_ticks: int = 
             result = controller.execute(action)
             recorder.record(StepRecord(
                 timestamp=state.timestamp, state=state, output=action, result=result.detail,
+                extra={"intent": decision.intent},
             ))
             logger.info(format_tick(state, decision.intent, action))
 
-            # 状态转移与首次接敌落关键帧截图（计划文档 3.4 节）
+            # M2 采样策略（计划 2 节）：事件驱动为主，周期保底，异常加采
+            # 事件帧：FSM 状态转移 / 首次接敌
             transitioned = decision.state_name != prev_fsm
             first_combat = bool(state.raw.get("in_combat")) and not saved_first_combat
             if transitioned or first_combat:
@@ -138,9 +142,26 @@ def run(settings: Settings, game: str, game_config_path: Path, max_ticks: int = 
                 prev_fsm = decision.state_name
                 if first_combat:
                     saved_first_combat = True
-            elif dry_run and tick % frame_interval == 0:
-                # 干跑模式：周期性抽样落帧，供用户核对 HUD 区域与阈值
+            elif dry_run:
+                # 干跑：周期性抽样落帧，供用户核对 HUD 区域与阈值
+                if tick % frame_interval == 0:
+                    recorder.save_frame(frame, f"{tick:06d}_sample")
+            elif tick % review_cfg.sample_interval_ticks == 0:
+                # 正式跑周期帧（复盘采样保底）
                 recorder.save_frame(frame, f"{tick:06d}_sample")
+
+            # 异常帧（两种模式都采）：卡住脱困触发 / hp 单 tick 跌幅超阈值
+            if getattr(decision.explorer, "unstick_triggered", False):
+                recorder.save_frame(frame, f"{tick:06d}_stuck")
+            hp = state.raw.get("hp_ratio")
+            if (
+                prev_hp is not None
+                and isinstance(hp, (int, float))
+                and prev_hp - float(hp) > review_cfg.hp_drop_alert
+            ):
+                recorder.save_frame(frame, f"{tick:06d}_hpdrop")
+            if isinstance(hp, (int, float)):
+                prev_hp = float(hp)
 
             tick += 1
             if max_ticks > 0 and tick >= max_ticks:
@@ -181,6 +202,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--probe-input", action="store_true",
                         help="输入链路诊断：倒计时后逐个动作发送真实输入并播报"
                              "（确认哪些动作在游戏内实际生效，定位输入问题）")
+    parser.add_argument("--review", metavar="RUN_DIR", default=None,
+                        help="Ollama 复盘：对 runs/<ts>/ 的采样帧+操作日志做离线分析，"
+                             "打印摘要并生成 tuning_suggestion.yaml 补丁（游戏退出后跑）")
     args = parser.parse_args(argv)
 
     if args.list_windows:
@@ -211,14 +235,60 @@ def main(argv: list[str] | None = None) -> int:
 
     game_config = Path(args.game_config) if args.game_config else Path(f"configs/{args.game}.yaml")
     try:
+        if args.review:
+            return run_review_cli(settings, args.game, Path(args.review), game_config)
         if args.calibrate:
             return run_calibrate_cli(settings, args.game, game_config)
         if args.probe_input:
             return run_probe_cli(args.game, game_config)
         return run(settings, args.game, game_config, max_ticks=args.max_ticks, dry_run=args.dry_run)
     except RuntimeError as exc:
-        # 截屏后端/窗口定位等启动失败：明确报错，不给 traceback
+        # 截屏后端/窗口定位/Ollama 等启动失败：明确报错，不给 traceback
         raise SystemExit(f"[auto_player] 启动失败: {exc}") from exc
+
+
+def run_review_cli(settings: Settings, game: str, run_dir: Path, game_config_path: Path) -> int:
+    """--review 入口：Ollama 复盘，打印摘要 + 补丁路径；不可达时明确报错。"""
+    if game != "wukong":
+        raise SystemExit(f"未知游戏适配器: {game}（M1 仅支持 wukong）")
+    from llm.providers.ollama_provider import OllamaProvider
+    from llm.review.engine import OllamaReviewEngine
+    from llm.tuning.patch import write_tuning_patch
+
+    if not run_dir.is_dir():
+        raise SystemExit(f"复盘目录不存在: {run_dir}（先跑一段采样，或对已有 runs/<ts> 目录复盘）")
+
+    provider = OllamaProvider(
+        model=settings.llm.model,
+        base_url=settings.llm.base_url,
+        vision_model=settings.llm.vision_model or settings.llm.model,
+    )
+    engine = OllamaReviewEngine(
+        provider,
+        settings.review,
+        game_config_path if game_config_path.is_file() else None,
+    )
+    report = engine.review(run_dir)
+
+    print(f"[review] 复盘摘要（{run_dir}）:")
+    print(report.summary)
+    if report.issues:
+        print("[review] 发现的问题:")
+        for issue in report.issues:
+            print(f"  - {issue}")
+    if report.tuning_suggestions:
+        patch_path = write_tuning_patch(
+            report.tuning_suggestions,
+            run_dir / "tuning_suggestion.yaml",
+            issues=report.issues,
+            reasons=engine.suggestion_reasons,
+            source=str(run_dir),
+        )
+        print(f"[review] 调参补丁: {patch_path}")
+        print("[review] 补丁不会自动应用，请人工核对后手动合入 configs/wukong.yaml")
+    else:
+        print("[review] 无调参建议（未生成补丁文件）")
+    return 0
 
 
 def run_probe_cli(game: str, game_config_path: Path) -> int:

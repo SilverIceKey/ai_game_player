@@ -42,6 +42,7 @@ class CoverageExplorer:
         self._unstick_left = 0
         self._commit_dir: str | None = None  # 航向承诺中的转向方向
         self._commit_ticks = 0
+        self.unstick_triggered = False  # 本 tick 是否触发了卡住脱困（M2 异常采样帧用）
 
     def decide(
         self,
@@ -51,6 +52,7 @@ class CoverageExplorer:
     ) -> Action:
         p = self.params
         self._tick += 1
+        self.unstick_triggered = False
         x, y, theta = pose
         self.grid.visit(x, y)
         self._recent.append((x, y))
@@ -73,6 +75,7 @@ class CoverageExplorer:
         if self._is_stuck():
             self._unstick_left = p.unstick_turn_ticks
             self._recent.clear()
+            self.unstick_triggered = True
             return Action("turn", {"direction": "right", "degrees": p.turn_degrees})
 
         # 周期性尝试锁定

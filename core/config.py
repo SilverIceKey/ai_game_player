@@ -38,7 +38,18 @@ class RecorderConfig:
 class LLMConfig:
     provider: str = "ollama"
     model: str = ""
+    vision_model: str = ""  # 复盘图文模型（缺省回退 model）
     base_url: str = ""
+
+
+@dataclass(frozen=True)
+class ReviewConfig:
+    """M2 复盘采样与分批参数。"""
+
+    batch_size: int = 4  # 每批送模型的帧数（控制上下文与显存峰值）
+    window_ticks: int = 30  # 帧前后各取多少 tick 的操作日志配对
+    hp_drop_alert: float = 0.3  # 单 tick 血量跌幅超过该值落异常帧
+    sample_interval_ticks: int = 300  # 正式跑周期落帧间隔（300 tick ≈ 30 秒 @10fps）
 
 
 @dataclass(frozen=True)
@@ -47,6 +58,7 @@ class Settings:
     game: GameRef
     recorder: RecorderConfig
     llm: LLMConfig
+    review: ReviewConfig = ReviewConfig()
 
 
 def load_yaml_file(path: str | Path) -> dict[str, Any]:
@@ -99,6 +111,7 @@ def load_settings(path: str | Path) -> Settings:
 
     recorder = _section(data, "recorder")
     llm = _section(data, "llm")
+    review = _section(data, "review")
     return Settings(
         runtime=RuntimeConfig(mode=mode, fps=float(fps)),
         game=game_ref,
@@ -106,6 +119,27 @@ def load_settings(path: str | Path) -> Settings:
         llm=LLMConfig(
             provider=str(llm.get("provider", "ollama")),
             model=str(llm.get("model", "")),
+            vision_model=str(llm.get("vision_model", "")),
             base_url=str(llm.get("base_url", "")),
         ),
+        review=ReviewConfig(
+            batch_size=_positive_int(review.get("batch_size", 4), "review.batch_size"),
+            window_ticks=_positive_int(review.get("window_ticks", 30), "review.window_ticks"),
+            hp_drop_alert=_ratio(review.get("hp_drop_alert", 0.3), "review.hp_drop_alert"),
+            sample_interval_ticks=_positive_int(
+                review.get("sample_interval_ticks", 300), "review.sample_interval_ticks"
+            ),
+        ),
     )
+
+
+def _positive_int(value: Any, ctx: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ConfigError(f"{ctx} 必须为正整数: {value!r}")
+    return value
+
+
+def _ratio(value: Any, ctx: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not (0.0 < float(value) <= 1.0):
+        raise ConfigError(f"{ctx} 必须是 (0, 1] 区间数值: {value!r}")
+    return float(value)

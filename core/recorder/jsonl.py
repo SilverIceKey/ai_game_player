@@ -18,7 +18,9 @@ from core.recorder.base import StepRecord
 class JsonlRecorder:
     """实现 core.recorder.base.Recorder 契约。"""
 
-    def __init__(self, run_dir: str | Path, filename: str = "session.jsonl"):
+    DEFAULT_FILENAME = "replay.jsonl"
+
+    def __init__(self, run_dir: str | Path, filename: str = DEFAULT_FILENAME):
         self.run_dir = Path(run_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.frames_dir = self.run_dir / "frames"
@@ -69,3 +71,30 @@ class JsonlRecorder:
             "result": step.result,
             "extra": step.extra,
         }
+
+
+# ---------- 回放读取（M2 复盘配对用） ----------
+
+
+def read_replay(path: str | Path) -> list[dict]:
+    """读取回放 JSONL：每行一条记录，行号即 tick 序号（主循环每 tick 记录一条）。"""
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"回放文件不存在: {p}")
+    records = []
+    for lineno, line in enumerate(p.read_text(encoding="utf-8").splitlines(), start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"回放文件 {p} 第 {lineno} 行 JSON 损坏: {exc}") from exc
+    return records
+
+
+def tick_window(records: list[dict], tick: int, window_ticks: int) -> list[tuple[int, dict]]:
+    """取 tick 前后各 window_ticks 的记录，返回 [(tick序号, 记录)]，供帧 ↔ 操作日志配对。"""
+    lo = max(0, tick - window_ticks)
+    hi = min(len(records), tick + window_ticks + 1)
+    return [(i, records[i]) for i in range(lo, hi)]

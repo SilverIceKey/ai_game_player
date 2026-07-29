@@ -13,6 +13,13 @@ recorder:
 
 llm:
   provider: ollama              # ollama（默认，本地）/ kimi / openai
-  model: "qwen2.5:7b"           # 离线复盘用；游戏运行时不起 LLM，避免抢显存
+  model: "qwen2.5:7b"           # 离线复盘文本模型；游戏运行时不起 LLM，避免抢显存
+  vision_model: "qwen2.5vl:7b"  # 复盘图文模型（帧+操作日志一起送）；游戏退出后跑 7B Q4
   base_url: "http://localhost:11434"  # kimi/openai 时改为对应端点
   # api_key 走环境变量 LLM_API_KEY，见 .env.example
+
+review:                         # M2：Ollama 周期复盘与调参（--review 手动触发）
+  batch_size: 4                 # 每批送模型的帧数（控制上下文与显存峰值）
+  window_ticks: 30              # 帧前后各取多少 tick 的操作日志配对
+  hp_drop_alert: 0.3            # 单 tick 血量跌幅超过该值落异常帧
+  sample_interval_ticks: 300    # 正式跑周期落帧间隔（300 tick ≈ 30 秒 @10fps）

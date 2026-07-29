@@ -24,7 +24,7 @@ def test_record_and_export(tmp_path):
     path = rec.export()
     rec.close()
 
-    assert path == tmp_path / "run1" / "session.jsonl"
+    assert path == tmp_path / "run1" / "replay.jsonl"
     lines = path.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 2
 

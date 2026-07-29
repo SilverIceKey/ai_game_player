@@ -72,7 +72,7 @@ def test_dry_run_loop_end_to_end(tmp_path, monkeypatch):
     assert any(line.strip().startswith("intent ") for line in log_lines)
     assert any(line.strip().startswith("action ") for line in log_lines)
 
-    records = (run_dir / "session.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    records = (run_dir / "replay.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert len(records) == 5
     for line in records:
         assert json.loads(line)["result"] == "dry-run"
