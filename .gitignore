@@ -13,9 +13,8 @@ target/
 .env.*
 !.env.example
 
-# 编辑器与系统
+# 编辑器与系统（.vscode/ 为项目共享配置，按需求纳入版本管理，不忽略）
 .idea/
-.vscode/
 .DS_Store
 
 # 日志与临时文件
