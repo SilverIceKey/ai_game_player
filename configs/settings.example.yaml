@@ -1,0 +1,18 @@
+# 全局配置示例。复制为 settings.yaml 后按本机环境修改。
+
+runtime:
+  mode: auto          # auto=全自动 / assist=半自动建议
+  fps: 10             # 感知-决策循环频率；受 2070s 推理预算约束，勿盲目调高
+
+game:
+  name: wukong
+  window_title: "黑神话：悟空"   # 截屏窗口定位用
+
+recorder:
+  output_dir: "runs/"           # 回放样本输出目录，供 LLM 复盘
+
+llm:
+  provider: ollama              # ollama（默认，本地）/ kimi / openai
+  model: "qwen2.5:7b"           # 离线复盘用；游戏运行时不起 LLM，避免抢显存
+  base_url: "http://localhost:11434"  # kimi/openai 时改为对应端点
+  # api_key 走环境变量 LLM_API_KEY，见 .env.example

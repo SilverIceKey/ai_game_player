@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-game-player"
+version = "0.1.0"
+description = "AI 游戏玩家：3D 游戏全自动 + 回合制 PK 辅助 + LLM 离线复盘调参"
+requires-python = ">=3.11"
+dependencies = [
+    "mss",
+    "numpy",
+    "opencv-python-headless",
+    "pydirectinput",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+llm = ["ollama", "openai"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["core*", "games*", "llm*", "apps*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
