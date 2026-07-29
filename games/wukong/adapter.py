@@ -18,12 +18,14 @@ from core.config import ConfigError, load_yaml_file, require
 from core.contracts import Action, GameState
 from core.control.directinput import ControlParams
 from core.decision.navigation import ExplorationParams
+from core.perception.bars import BarSearchSpec, detect_bar
 from core.perception.odometry import OdometryParams, VisualOdometry
 from core.perception.regions import (
     BarSpec,
     ColorRange,
     PresenceSpec,
     detect_presence,
+    match_ratio,
     measure_bar,
 )
 from core.perception.walkable import WalkableAnalyzer, WalkableParams
@@ -46,7 +48,8 @@ class WindowConfig:
 class HudConfig:
     hp_bar: BarSpec
     stamina_bar: BarSpec
-    enemy_hp_bar: BarSpec
+    enemy_hp_bar: BarSpec  # Boss 固定血条（位置固定）；与普通小怪动态血条互补，优先采用
+    enemy_search: BarSearchSpec  # 普通小怪动态血条搜索区域（浮头血条，位置不固定）
     gourd: PresenceSpec
     dead_indicator: PresenceSpec
 
@@ -67,6 +70,7 @@ class CombatParams:
     enemy_lost_ticks: int = 8  # 敌方血条连续消失 tick 数 → 脱战
     loot_wait_ticks: int = 20  # 掉落/脱战等待 tick 数
     enemy_present_min: float = 0.02  # 敌方血条填充超过该值视为接敌
+    hp_visible_min: float = 0.02  # 自身血条区域匹配像素占比达到该值视为血条可见（非战斗隐藏）
 
 
 @dataclass(frozen=True)
@@ -122,6 +126,7 @@ class WukongConfig:
             hp_bar=_bar(require(hud, "hp_bar", "hud"), "hud.hp_bar"),
             stamina_bar=_bar(require(hud, "stamina_bar", "hud"), "hud.stamina_bar"),
             enemy_hp_bar=_bar(require(hud, "enemy_hp_bar", "hud"), "hud.enemy_hp_bar"),
+            enemy_search=_search(require(hud, "enemy_search", "hud"), "hud.enemy_search"),
             gourd=_presence(require(hud, "gourd", "hud"), "hud.gourd"),
             dead_indicator=_presence(require(hud, "dead_indicator", "hud"), "hud.dead_indicator"),
         )
@@ -188,6 +193,24 @@ def _presence(raw: Any, ctx: str) -> PresenceSpec:
     )
 
 
+def _search(raw: Any, ctx: str) -> BarSearchSpec:
+    track = None
+    if raw.get("track_hsv_lower") is not None and raw.get("track_hsv_upper") is not None:
+        lower, upper = raw["track_hsv_lower"], raw["track_hsv_upper"]
+        if len(lower) != 3 or len(upper) != 3:
+            raise ConfigError(f"{ctx} 的 track HSV 阈值必须是 3 元素列表")
+        track = ColorRange(tuple(int(v) for v in lower), tuple(int(v) for v in upper))  # type: ignore[arg-type]
+    return BarSearchSpec(
+        rect=_rect4(require(raw, "rect", ctx), f"{ctx}.rect"),
+        color=_color(raw, ctx),
+        track_color=track,
+        min_length=int(raw.get("min_length", 40)),
+        min_aspect=float(raw.get("min_aspect", 3.0)),
+        min_fill=float(raw.get("min_fill", 0.5)),
+        column_fill=float(raw.get("column_fill", 0.3)),
+    )
+
+
 class WukongAdapter:
     """实现 games.base.GameAdapter 契约。"""
 
@@ -202,10 +225,31 @@ class WukongAdapter:
         cfg = self.config
         base = cfg.perception.base_resolution
 
-        hp = measure_bar(frame, cfg.hud.hp_bar, base)
+        # 自身血条非战斗隐藏（计划 3.1a）：不可见时 hp 按 1.0 处理（无读数即无伤）
+        hp_visible = match_ratio(frame, cfg.hud.hp_bar, base) >= cfg.combat.hp_visible_min
+        hp = measure_bar(frame, cfg.hud.hp_bar, base) if hp_visible else 1.0
         stamina = measure_bar(frame, cfg.hud.stamina_bar, base)
-        enemy_hp = measure_bar(frame, cfg.hud.enemy_hp_bar, base)
-        enemy_present = enemy_hp >= cfg.combat.enemy_present_min
+
+        # 敌方血条：Boss 固定条优先，其次普通小怪动态浮头血条（区域检测）
+        boss_hp = measure_bar(frame, cfg.hud.enemy_hp_bar, base)
+        boss_present = boss_hp >= cfg.combat.enemy_present_min
+        detected = detect_bar(frame, cfg.hud.enemy_search, base)
+        if boss_present:
+            enemy_hp: float | None = boss_hp
+            enemy_present = True
+            enemy_source: str | None = "boss"
+            enemy_box = cfg.hud.enemy_hp_bar.rect
+        elif detected is not None:
+            enemy_hp = detected.ratio
+            enemy_present = True
+            enemy_source = "dynamic"
+            enemy_box = detected.box
+        else:
+            enemy_hp = None
+            enemy_present = False
+            enemy_source = None
+            enemy_box = None
+
         gourd = detect_presence(frame, cfg.hud.gourd, base)
         dead = detect_presence(frame, cfg.hud.dead_indicator, base)
 
@@ -224,9 +268,12 @@ class WukongAdapter:
             scene=scene,
             raw={
                 "hp_ratio": hp,
+                "hp_visible": hp_visible,
                 "stamina_ratio": stamina,
                 "gourd_available": gourd,
-                "enemy_hp_ratio": enemy_hp if enemy_present else None,
+                "enemy_hp_ratio": enemy_hp,
+                "enemy_hp_source": enemy_source,
+                "enemy_bar_box": enemy_box,
                 "enemy_present": enemy_present,
                 "in_combat": enemy_present,
                 "pose": pose.as_tuple(),

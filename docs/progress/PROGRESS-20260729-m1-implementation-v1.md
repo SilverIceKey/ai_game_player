@@ -28,6 +28,12 @@
   - 实机联调修复（WGC 事件注册）：包强制要求同时注册 `on_frame_arrived` 与 `on_closed`，缺后者 start() 报 "on_closed Event Handler Is Not Set"；已补 on_closed 处理器及捕获关闭后的明确报错（`core/perception/wgc_source.py`，新增 `tests/test_wgc_source.py` 伪造包覆盖该路径）
   - 实机联调修复（WGC 阻塞式 start）：v1.x 的 `start()` 在调用线程跑捕获循环（现象：捕获边框亮起后程序卡死），改为守护线程承载 + 线程内异常转交主线程；窗口标题匹配忽略首尾空格（配置 "b1  " 手误场景）
   - 实机联调新增（输入链路诊断 `--probe-input`）：实机反馈"只前进、视角不转"。turn 由合成鼠标相对移动（`pdi.moveRel`）实现，move 由键盘实现——两条输入路径需分别验证。新增 `apps/auto_player/probe.py`：倒计时后逐个动作发真实输入并播报，用于区分"决策没发 turn"（查 session.log 有无 action turn 行）与"合成鼠标移动被游戏忽略"（probe 的转向也不生效）两类根因。根因待用户 probe 反馈后定位，**未定性**
+- 感知设计修正（2026-07-29 用户反馈，计划 3.1a/3.1b）：
+  - 固定 ROI 拆动静：自身血条/体力/葫芦/Boss 固定条/死亡指示保留 ROI；**小怪血条浮在头顶不固定** → 改为搜索区域动态检测（HSV+轮廓+形状筛选，双色模型：槽定全长、填充定 ratio），取离画面中心最近一条
+  - 自身血条非战斗隐藏：`hp_visible=false` 时 hp 按 1.0、作为脱战信号
+  - `--edit-roi` 交互式校准：抓帧 → 菜单选参数 → `cv2.selectROI` 鼠标拖框 → ruamel.yaml 保留注释写回 configs（替代手填坐标）
+  - 依赖变更：win32 用 GUI 版 opencv-python（selectROI 需要），Linux 保持 headless；新增 ruamel.yaml
+  - 实机待校准：enemy_search 的 track 槽色 HSV 是占位值；复杂场景误检率未知
 
 ## 下一步动作
 

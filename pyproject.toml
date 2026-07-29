@@ -10,9 +10,11 @@ requires-python = ">=3.11"
 dependencies = [
     "mss",
     "numpy",
-    "opencv-python-headless",
+    "opencv-python-headless; sys_platform != 'win32'",
+    "opencv-python; sys_platform == 'win32'",
     "pydirectinput",
     "pyyaml",
+    "ruamel.yaml>=0.18",
     "windows-capture>=1.5,<2; sys_platform == 'win32'",
 ]
 

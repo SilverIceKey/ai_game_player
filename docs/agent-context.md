@@ -15,6 +15,7 @@
 - 新增 `llm/providers/ollama_provider.py`、`llm/review/engine.py`、`llm/review/prompts.py`、`llm/tuning/patch.py`
 - 修改 `apps/auto_player/main.py`（正式跑采样落帧 + `--review` 模式）、`core/recorder/jsonl.py`（replay.jsonl + 读取配对）、`core/config.py`（vision_model + review 段）、`core/decision/navigation.py`（unstick_triggered 信号）、`configs/settings.example.yaml`
 - 新增 `tests/test_review.py`（17 例）；适配 replay.jsonl 改名
+- 感知设计修正（M1 计划 3.1a/3.1b）：新增 `core/perception/bars.py`（动态血条检测）、`apps/auto_player/edit_roi.py`（--edit-roi 交互校准）；adapter 改双色动态敌条 + hp_visible；calibrate 适配；pyproject 平台分流 opencv + ruamel.yaml；测试 101 → 115 例
 - 更新 `docs/progress/PROGRESS-20260729-m2-ollama-review-v1.md`
 
 ## 验证结果

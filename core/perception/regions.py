@@ -63,13 +63,31 @@ def crop_region(
     return frame[y : y + h, x : x + w]
 
 
-def _mask(region: np.ndarray, color: ColorRange) -> np.ndarray:
+def color_mask(region: np.ndarray, color: ColorRange) -> np.ndarray:
+    """BGR 区域 → HSV 匹配色掩码（供 bars.py 等复用）。"""
     hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
     return cv2.inRange(
         hsv,
         np.array(color.lower, dtype=np.uint8),
         np.array(color.upper, dtype=np.uint8),
     )
+
+
+def _mask(region: np.ndarray, color: ColorRange) -> np.ndarray:
+    return color_mask(region, color)
+
+
+def match_ratio(
+    frame: np.ndarray,
+    spec,
+    base_resolution: tuple[int, int] = (1920, 1080),
+) -> float:
+    """区域内匹配色像素占比（spec 需有 rect 与 color 字段）。"""
+    region = crop_region(frame, spec.rect, base_resolution)
+    if region.size == 0:
+        return 0.0
+    mask = color_mask(region, spec.color)
+    return float((mask > 0).mean())
 
 
 def measure_bar(
@@ -92,8 +110,4 @@ def detect_presence(
     base_resolution: tuple[int, int] = (1920, 1080),
 ) -> bool:
     """检测块状 HUD 是否存在（匹配色像素占比 >= spec.min_ratio）。"""
-    region = crop_region(frame, spec.rect, base_resolution)
-    if region.size == 0:
-        return False
-    mask = _mask(region, spec.color)
-    return float((mask > 0).mean()) >= spec.min_ratio
+    return match_ratio(frame, spec, base_resolution) >= spec.min_ratio

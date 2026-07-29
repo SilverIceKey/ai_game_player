@@ -205,6 +205,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--review", metavar="RUN_DIR", default=None,
                         help="Ollama 复盘：对 runs/<ts>/ 的采样帧+操作日志做离线分析，"
                              "打印摘要并生成 tuning_suggestion.yaml 补丁（游戏退出后跑）")
+    parser.add_argument("--edit-roi", action="store_true",
+                        help="交互式 ROI 校准：抓一帧后菜单选择区域、鼠标拖框，"
+                             "q 退出时统一写回 configs/wukong.yaml（需 GUI 版 opencv）")
     args = parser.parse_args(argv)
 
     if args.list_windows:
@@ -239,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_review_cli(settings, args.game, Path(args.review), game_config)
         if args.calibrate:
             return run_calibrate_cli(settings, args.game, game_config)
+        if args.edit_roi:
+            return run_edit_roi_cli(args.game, game_config)
         if args.probe_input:
             return run_probe_cli(args.game, game_config)
         return run(settings, args.game, game_config, max_ticks=args.max_ticks, dry_run=args.dry_run)
@@ -306,6 +311,26 @@ def run_probe_cli(game: str, game_config_path: Path) -> int:
     controller = DirectInputController(config.keys, config.control)
     run_probe(controller)
     return 0
+
+
+def run_edit_roi_cli(game: str, game_config_path: Path) -> int:
+    """--edit-roi 入口：抓帧/GUI 失败时给出明确报错而非 traceback。"""
+    if game != "wukong":
+        raise SystemExit(f"未知游戏适配器: {game}（M1 仅支持 wukong）")
+    from apps.auto_player.edit_roi import run_edit_roi
+    from core.perception.source_factory import build_frame_source
+    from games.wukong.adapter import WukongConfig
+
+    config = WukongConfig.load(game_config_path)
+    try:
+        source = build_frame_source(config.window)
+        return run_edit_roi(game_config_path, source, config.perception.base_resolution)
+    except Exception as exc:
+        raise SystemExit(
+            f"[edit-roi] 失败: {exc}\n"
+            "需要 Windows 实机 + GUI 版 opencv（opencv-python）+ 游戏画面可抓取；"
+            "Linux 开发机不支持本模式。"
+        ) from exc
 
 
 def run_calibrate_cli(settings: Settings, game: str, game_config_path: Path) -> int:

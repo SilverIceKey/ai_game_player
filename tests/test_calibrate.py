@@ -58,9 +58,11 @@ def test_run_calibrate_outputs(tmp_path, capsys):
 def test_measure_regions_values():
     cfg = _config()
     measurements = measure_regions(_frame_with_hp(cfg, ratio=0.8), cfg)
-    assert measurements["hp_ratio"] == 0.8 or abs(measurements["hp_ratio"] - 0.8) < 0.05
+    assert abs(measurements["hp_ratio"] - 0.8) < 0.05
+    assert measurements["hp_visible"] is True
     assert measurements["stamina_ratio"] == 0.0
-    assert measurements["enemy_hp_ratio"] == 0.0
+    assert measurements["boss_hp_ratio"] == 0.0
+    assert measurements["enemy_hp_dynamic"] is None
     assert measurements["gourd_available"] is False
     assert measurements["dead_indicator"] is False
 
@@ -73,4 +75,6 @@ def test_annotate_frame_draws_all_regions():
     assert int(annotated.sum()) > 0
     # 裁剪图文件名规则即区域名（校准工作流依赖该约定）
     names = [name for name, _ in cfg.hud.__dict__.items()]
-    assert set(names) == {"hp_bar", "stamina_bar", "enemy_hp_bar", "gourd", "dead_indicator"}
+    assert set(names) == {
+        "hp_bar", "stamina_bar", "enemy_hp_bar", "enemy_search", "gourd", "dead_indicator",
+    }
