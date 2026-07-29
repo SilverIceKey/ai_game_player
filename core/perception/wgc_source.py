@@ -53,6 +53,7 @@ class WgcFrameSource:
         self.first_frame_timeout = float(first_frame_timeout)
         self._cond = threading.Condition()
         self._latest: np.ndarray | None = None
+        self._closed = False
         self._started = False
 
         try:
@@ -64,6 +65,14 @@ class WgcFrameSource:
                     return
                 with self._cond:
                     self._latest = buf[:, :, :3].copy()  # BGRA → BGR
+                    self._cond.notify_all()
+
+            # windows-capture 强制要求 on_closed 处理器，缺失时 start() 报
+            # "on_closed Event Handler Is Not Set"（v1.x 实机验证）
+            @self._capture.event
+            def on_closed():
+                with self._cond:
+                    self._closed = True
                     self._cond.notify_all()
         except (AttributeError, TypeError) as exc:
             raise RuntimeError(self._api_error(f"event 回调注册不符: {exc}")) from exc
@@ -83,9 +92,10 @@ class WgcFrameSource:
         except TypeError as exc:
             raise RuntimeError(self._api_error(f"start() 调用不符: {exc}")) from exc
         with self._cond:
-            if self._latest is None:
+            if self._latest is None and not self._closed:
                 arrived = self._cond.wait_for(
-                    lambda: self._latest is not None, timeout=self.first_frame_timeout
+                    lambda: self._latest is not None or self._closed,
+                    timeout=self.first_frame_timeout,
                 )
                 if not arrived:
                     raise RuntimeError(
@@ -94,12 +104,19 @@ class WgcFrameSource:
                         "（窗口不存在/被最小化，或包 API 不符；"
                         "可用 --list-windows 核对窗口标题）"
                     )
+            if self._closed and self._latest is None:
+                raise RuntimeError(
+                    f"WGC 捕获在首帧前被关闭: 窗口 {self.window_title!r}"
+                    "（窗口可能已关闭，可用 --list-windows 核对）"
+                )
         self._started = True
 
     def grab(self) -> np.ndarray:
         """返回最近一帧 BGR 图像，形状 (H, W, 3)；首帧前阻塞等待（带超时）。"""
         self.start()
         with self._cond:
+            if self._closed:
+                raise RuntimeError(f"WGC 捕获已关闭: 窗口 {self.window_title!r}（窗口已关闭？）")
             latest = self._latest
         assert latest is not None  # start() 已保证
         return latest.copy()
