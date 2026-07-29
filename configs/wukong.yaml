@@ -3,7 +3,7 @@
 # （计划文档第 5 节假设 2/3；日志与 runs/<ts>/frames/ 关键帧可辅助校准）。
 
 window:
-  title: "黑神话：悟空"        # 截屏窗口定位用（枚举可见窗口，先精确后包含匹配；用 --list-windows 查看实际标题）
+  title: "b1  "        # 截屏窗口定位用（枚举可见窗口，先精确后包含匹配；用 --list-windows 查看实际标题）
   capture_backend: auto        # 截屏后端：auto（WGC 后台截屏优先，失败降级 mss）/ mss / wgc
                                # WGC 截窗口内容，游戏被 VSCode 遮挡也能抓到；mss 截屏幕区域，要求窗口在前台
   foreground_on_start: true    # 正式跑（非 dry-run/calibrate）启动时把游戏窗口提前台（mss 后端必需）
