@@ -65,6 +65,11 @@ class CombatParams:
 
 
 @dataclass(frozen=True)
+class DryRunParams:
+    frame_interval_ticks: int = 50  # 干跑模式周期性抽样落帧间隔（tick）
+
+
+@dataclass(frozen=True)
 class WukongConfig:
     window: WindowConfig
     perception: PerceptionConfig
@@ -73,6 +78,7 @@ class WukongConfig:
     keys: dict[str, str]
     control: ControlParams
     exploration: ExplorationParams
+    dry_run: DryRunParams = DryRunParams()
 
     @classmethod
     def load(cls, path: str | Path) -> WukongConfig:
@@ -119,6 +125,7 @@ class WukongConfig:
             keys={str(k): str(v) for k, v in keys.items()},
             control=_params(ControlParams, data.get("control"), "control"),
             exploration=_params(ExplorationParams, data.get("exploration"), "exploration"),
+            dry_run=_params(DryRunParams, data.get("dry_run"), "dry_run"),
         )
 
 

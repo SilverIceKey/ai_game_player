@@ -59,9 +59,13 @@ def setup_logger(log_path: Path) -> logging.Logger:
     return logger
 
 
-def build_wukong(game_config_path: Path):
-    """装配悟空链路各组件（导入延迟到选择游戏时，避免无关适配器依赖）。"""
+def build_wukong(game_config_path: Path, dry_run: bool = False):
+    """装配悟空链路各组件（导入延迟到选择游戏时，避免无关适配器依赖）。
+
+    dry_run=True 时使用 NullController：链路照常跑，绝不触达真实输入。
+    """
     from core.control.directinput import DirectInputController
+    from core.control.null_controller import NullController
     from core.decision.navigation import CoverageExplorer
     from core.navigation.grid_map import OccupancyGrid
     from core.perception.mss_source import WindowFrameSource
@@ -73,31 +77,34 @@ def build_wukong(game_config_path: Path):
     grid = OccupancyGrid(config.exploration.grid_size_m, config.exploration.grid_resolution)
     explorer = CoverageExplorer(grid, config.exploration)
     decision = CombatDecision(config, explorer, grid)
-    controller = DirectInputController(config.keys, config.control)
+    controller = NullController() if dry_run else DirectInputController(config.keys, config.control)
     source = WindowFrameSource(config.window.title, rect=config.window.rect)
-    return source, adapter, decision, controller
+    return source, adapter, decision, controller, config
 
 
-def run(settings: Settings, game: str, game_config_path: Path, max_ticks: int = 0) -> int:
+def run(settings: Settings, game: str, game_config_path: Path, max_ticks: int = 0,
+        dry_run: bool = False) -> int:
     run_dir = Path(settings.recorder.output_dir) / datetime.now().strftime("%Y%m%d-%H%M%S")
     recorder = JsonlRecorder(run_dir)
     logger = setup_logger(run_dir / "session.log")
 
     if game != "wukong":
         raise SystemExit(f"未知游戏适配器: {game}（M1 仅支持 wukong）")
-    source, adapter, decision, controller = build_wukong(game_config_path)
+    source, adapter, decision, controller, game_config = build_wukong(game_config_path, dry_run)
 
     if settings.runtime.mode != "auto":
         logger.warning("[%s] runtime.mode=%s，auto_player 为全自动模式，建议 mode=auto",
                        datetime.now().strftime("%H:%M:%S.%f")[:-3], settings.runtime.mode)
 
     interval = 1.0 / settings.runtime.fps
-    logger.info("[%s] session start game=%s fps=%g run_dir=%s",
-                datetime.now().strftime("%H:%M:%S.%f")[:-3], game, settings.runtime.fps, run_dir)
+    logger.info("[%s] session start game=%s fps=%g dry_run=%s run_dir=%s",
+                datetime.now().strftime("%H:%M:%S.%f")[:-3], game, settings.runtime.fps,
+                "true" if dry_run else "false", run_dir)
 
     tick = 0
     prev_fsm = decision.state_name
     saved_first_combat = False
+    frame_interval = game_config.dry_run.frame_interval_ticks
     try:
         while True:
             started = time.monotonic()
@@ -118,6 +125,9 @@ def run(settings: Settings, game: str, game_config_path: Path, max_ticks: int = 
                 prev_fsm = decision.state_name
                 if first_combat:
                     saved_first_combat = True
+            elif dry_run and tick % frame_interval == 0:
+                # 干跑模式：周期性抽样落帧，供用户核对 HUD 区域与阈值
+                recorder.save_frame(frame, f"{tick:06d}_sample")
 
             tick += 1
             if max_ticks > 0 and tick >= max_ticks:
@@ -146,6 +156,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="游戏专属配置路径，缺省 configs/<game>.yaml")
     parser.add_argument("--max-ticks", type=int, default=0,
                         help="最多执行 tick 数（0=不限，调试用）")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="干跑模式：完整跑截屏-感知-决策-日志-记录链路，"
+                             "但不发任何键鼠输入（首次实机核对配置用）")
+    parser.add_argument("--calibrate", action="store_true",
+                        help="HUD 校准：抓一帧，输出整图标注/区域裁剪/测量值到 "
+                             "runs/<timestamp>/calib/ 后退出（不发输入）")
     args = parser.parse_args(argv)
 
     config_path = Path(args.config)
@@ -161,7 +177,32 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings(config_path)
 
     game_config = Path(args.game_config) if args.game_config else Path(f"configs/{args.game}.yaml")
-    return run(settings, args.game, game_config, max_ticks=args.max_ticks)
+    if args.calibrate:
+        return run_calibrate_cli(settings, args.game, game_config)
+    return run(settings, args.game, game_config, max_ticks=args.max_ticks, dry_run=args.dry_run)
+
+
+def run_calibrate_cli(settings: Settings, game: str, game_config_path: Path) -> int:
+    """--calibrate 入口：抓帧失败时给出明确报错而非 traceback。"""
+    if game != "wukong":
+        raise SystemExit(f"未知游戏适配器: {game}（M1 仅支持 wukong）")
+    from apps.auto_player.calibrate import run_calibrate
+    from core.perception.mss_source import WindowFrameSource
+    from games.wukong.adapter import WukongConfig
+
+    config = WukongConfig.load(game_config_path)
+    source = WindowFrameSource(config.window.title, rect=config.window.rect)
+    try:
+        out_dir = run_calibrate(config, source, settings.recorder.output_dir)
+    except Exception as exc:
+        raise SystemExit(
+            f"[calibrate] 抓帧失败: {exc}\n"
+            "请确认游戏已启动、窗口标题与 configs/wukong.yaml 的 window.title 一致"
+            "（或配置 window.rect 手动指定截屏区域）；"
+            "Linux 开发机无法抓屏，--calibrate 仅支持 Windows 实机。"
+        ) from exc
+    print(f"[calibrate] 完成，输出目录: {out_dir}")
+    return 0
 
 
 if __name__ == "__main__":

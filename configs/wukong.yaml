@@ -86,3 +86,6 @@ exploration:                   # 覆盖式探索参数
   align_degrees: 15.0          # 导航对齐容差
   arrive_distance: 1.0         # 到达探索断点的判定距离
   obstacle_score: 0.2          # 中央扇区评分低于该值时把正前方标记为障碍
+
+dry_run:                       # --dry-run 干跑模式（不发任何键鼠输入）
+  frame_interval_ticks: 50     # 周期性抽样落帧间隔（tick）；状态转移/首次接敌照旧落帧
