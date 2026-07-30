@@ -21,6 +21,7 @@ from core.perception.regions import scale_rect
 EDITABLE_ITEMS: list[tuple[str, str]] = [
     ("hp_bar", "自身血条 hp_bar"),
     ("stamina_bar", "体力条 stamina_bar"),
+    ("mp_bar", "法力条 mp_bar"),
     ("gourd", "葫芦图标 gourd"),
     ("dead_indicator", "死亡提示 dead_indicator"),
     ("enemy_hp_bar", "Boss 固定血条 enemy_hp_bar"),

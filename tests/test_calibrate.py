@@ -61,6 +61,8 @@ def test_measure_regions_values():
     assert abs(measurements["hp_ratio"] - 0.8) < 0.05
     assert measurements["hp_visible"] is True
     assert measurements["stamina_ratio"] == 0.0
+    assert measurements["mp_ratio"] == 0.0
+    assert measurements["mp_visible"] is False
     assert measurements["boss_hp_ratio"] == 0.0
     assert measurements["enemy_hp_dynamic"] is None
     assert measurements["gourd_available"] is False
@@ -76,5 +78,6 @@ def test_annotate_frame_draws_all_regions():
     # 裁剪图文件名规则即区域名（校准工作流依赖该约定）
     names = [name for name, _ in cfg.hud.__dict__.items()]
     assert set(names) == {
-        "hp_bar", "stamina_bar", "enemy_hp_bar", "enemy_search", "gourd", "dead_indicator",
+        "hp_bar", "stamina_bar", "mp_bar", "enemy_hp_bar", "enemy_search",
+        "gourd", "dead_indicator",
     }

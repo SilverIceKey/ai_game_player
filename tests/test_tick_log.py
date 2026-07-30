@@ -12,6 +12,8 @@ def _state() -> GameState:
         raw={
             "hp_ratio": 0.82,
             "stamina_ratio": 0.61,
+            "mp_ratio": 0.66,
+            "mp_visible": True,
             "enemy_hp_ratio": 0.45,
             "gourd_available": True,
             "pose": (12.3, 4.1, 1.518),  # ≈ 87°
@@ -25,7 +27,7 @@ def test_format_tick_three_lines():
     assert len(lines) == 3
     assert re.match(
         r"^\[\d{2}:\d{2}:\d{2}\.\d{3}\] state scene=combat hp=0\.82 stamina=0\.61 "
-        r"enemy_hp=0\.45 gourd=1 pos=\(12\.3,4\.1,87°\)$",
+        r"mp=0\.66 enemy_hp=0\.45 gourd=1 pos=\(12\.3,4\.1,87°\)$",
         lines[0],
     )
     assert lines[1].strip() == "intent COMBAT: 持续输出"
@@ -44,7 +46,9 @@ def test_format_tick_continuation_aligned():
 def test_format_tick_enemy_absent():
     state = _state()
     state.raw["enemy_hp_ratio"] = None
+    state.raw["mp_visible"] = False  # 非战斗 MP 条隐藏 → 显示 -
     state.scene = "explore"
     lines = format_tick(state, "EXPLORE: 覆盖漫游", Action("turn", {"direction": "left", "degrees": 30})).splitlines()
     assert "enemy_hp=-" in lines[0]
+    assert "mp=-" in lines[0]
     assert "scene=explore" in lines[0]

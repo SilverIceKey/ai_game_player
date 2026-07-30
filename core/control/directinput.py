@@ -16,10 +16,11 @@ from core.control.base import Result
 @dataclass(frozen=True)
 class ControlParams:
     pixels_per_degree: float = 12.0  # 鼠标像素 / 转角（实机校准）
-    move_hold_seconds: float = 0.35  # 移动键按住时长
+    move_hold_seconds: float = 0.35  # tap 模式下移动键按住时长
     action_pause: float = 0.05  # 每次输入后的间隔，避免输入洪峰
     turn_degrees_per_second: float = 180.0  # 转向角速度（度/秒），平滑转向用
     turn_step_interval: float = 0.02  # 平滑转向的步进间隔（秒）
+    move_mode: str = "hold"  # hold=持续按住（顺畅，实机反馈后改默认）/ tap=每 tick 点按（旧行为）
 
 
 class DirectInputController:
@@ -30,6 +31,7 @@ class DirectInputController:
         self.params = params or ControlParams()
         self._pdi = None
         self._pdi_failed = False
+        self._held_move: set[str] = set()  # hold 模式下当前按住的移动键
 
     def _backend(self):
         if self._pdi is None and not self._pdi_failed:
@@ -42,9 +44,12 @@ class DirectInputController:
         return self._pdi
 
     def execute(self, action: Action) -> Result:
-        if action.name == "idle":
-            return Result(True, "idle")
         pdi = self._backend()
+        if action.name == "idle":
+            # 停止指令：松开所有按住的移动键
+            if pdi is not None:
+                self._release_move(pdi)
+            return Result(True, "idle")
         if pdi is None:
             return Result(False, "pydirectinput 不可用（仅 Windows 实机支持输入模拟）")
         try:
@@ -54,15 +59,42 @@ class DirectInputController:
         except Exception as exc:  # 输入层失败不应炸掉主循环
             return Result(False, f"输入执行失败: {exc}")
 
+    def release_all(self) -> None:
+        """松开全部按住的键。会话结束（含 Ctrl+C）必须调用，否则按键会卡死在按下态。"""
+        pdi = self._backend()
+        if pdi is not None:
+            self._release_move(pdi)
+
+    def _release_move(self, pdi) -> None:
+        for key in list(self._held_move):
+            try:
+                pdi.keyUp(key)
+            except Exception:
+                pass
+            self._held_move.discard(key)
+
+    def _hold_move(self, pdi, key: str) -> None:
+        """hold 模式：目标键按住不动；方向切换时先松旧键。同方向重复调用是 no-op。"""
+        for held in list(self._held_move):
+            if held != key:
+                pdi.keyUp(held)
+                self._held_move.discard(held)
+        if key not in self._held_move:
+            pdi.keyDown(key)
+            self._held_move.add(key)
+
     def _dispatch(self, pdi, action: Action) -> Result:
         p = self.params
         name = action.name
         if name == "move":
             direction = action.params.get("direction", "forward")
             key = self.keymap[f"move_{direction}"]
-            pdi.keyDown(key)
-            time.sleep(p.move_hold_seconds)
-            pdi.keyUp(key)
+            if p.move_mode == "tap":
+                pdi.keyDown(key)
+                time.sleep(p.move_hold_seconds)
+                pdi.keyUp(key)
+            else:
+                self._hold_move(pdi, key)
         elif name == "turn":
             degrees = float(action.params.get("degrees", 0.0))
             sign = -1.0 if action.params.get("direction") == "left" else 1.0

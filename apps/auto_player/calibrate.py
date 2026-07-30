@@ -41,6 +41,7 @@ def _region_items(config: WukongConfig) -> list[tuple[str, BarSpec | PresenceSpe
     return [
         ("hp_bar", hud.hp_bar),
         ("stamina_bar", hud.stamina_bar),
+        ("mp_bar", hud.mp_bar),
         ("enemy_hp_bar", hud.enemy_hp_bar),
         ("gourd", hud.gourd),
         ("dead_indicator", hud.dead_indicator),
@@ -78,6 +79,8 @@ def measure_regions(frame: np.ndarray, config: WukongConfig) -> dict[str, float 
         "hp_ratio": measure_bar(frame, hud.hp_bar, base),
         "hp_visible": match_ratio(frame, hud.hp_bar, base) >= config.combat.hp_visible_min,
         "stamina_ratio": measure_bar(frame, hud.stamina_bar, base),
+        "mp_ratio": measure_bar(frame, hud.mp_bar, base),
+        "mp_visible": match_ratio(frame, hud.mp_bar, base) >= config.combat.hp_visible_min,
         "boss_hp_ratio": measure_bar(frame, hud.enemy_hp_bar, base),
         "enemy_hp_dynamic": detected.ratio if detected is not None else None,
         "gourd_available": detect_presence(frame, hud.gourd, base),

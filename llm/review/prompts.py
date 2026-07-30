@@ -31,10 +31,16 @@ def format_record_line(tick: int, record: dict) -> str:
     enemy_s = f"{enemy:.2f}" if isinstance(enemy, (int, float)) else "-"
     hp = raw.get("hp_ratio")
     hp_s = f"{hp:.2f}" if isinstance(hp, (int, float)) else "-"
+    mp = raw.get("mp_ratio")
+    mp_s = (
+        f"{mp:.2f}"
+        if raw.get("mp_visible", True) and isinstance(mp, (int, float))
+        else "-"
+    )
     params = " ".join(f"{k}={v}" for k, v in (action_obj.get("params") or {}).items())
     action = action_obj.get("name", "?") + (f"({params})" if params else "")
     parts = [f"tick {tick:06d}", f"scene={state.get('scene', '?')}",
-             f"hp={hp_s}", f"enemy_hp={enemy_s}"]
+             f"hp={hp_s}", f"mp={mp_s}", f"enemy_hp={enemy_s}"]
     if intent:
         parts.append(f"intent={intent}")
     parts.append(f"action={action}")

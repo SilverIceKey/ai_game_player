@@ -48,6 +48,7 @@ class WindowConfig:
 class HudConfig:
     hp_bar: BarSpec
     stamina_bar: BarSpec
+    mp_bar: BarSpec  # 法力条（法术资源；与 HP 条同显同隐，只做感知/日志/回放，不接决策）
     enemy_hp_bar: BarSpec  # Boss 固定血条（位置固定）；与普通小怪动态血条互补，优先采用
     enemy_search: BarSearchSpec  # 普通小怪动态血条搜索区域（浮头血条，位置不固定）
     gourd: PresenceSpec
@@ -125,6 +126,7 @@ class WukongConfig:
         hud_cfg = HudConfig(
             hp_bar=_bar(require(hud, "hp_bar", "hud"), "hud.hp_bar"),
             stamina_bar=_bar(require(hud, "stamina_bar", "hud"), "hud.stamina_bar"),
+            mp_bar=_bar(require(hud, "mp_bar", "hud"), "hud.mp_bar"),
             enemy_hp_bar=_bar(require(hud, "enemy_hp_bar", "hud"), "hud.enemy_hp_bar"),
             enemy_search=_search(require(hud, "enemy_search", "hud"), "hud.enemy_search"),
             gourd=_presence(require(hud, "gourd", "hud"), "hud.gourd"),
@@ -229,6 +231,9 @@ class WukongAdapter:
         hp_visible = match_ratio(frame, cfg.hud.hp_bar, base) >= cfg.combat.hp_visible_min
         hp = measure_bar(frame, cfg.hud.hp_bar, base) if hp_visible else 1.0
         stamina = measure_bar(frame, cfg.hud.stamina_bar, base)
+        # 法力条与 HP 条同显同隐：只做感知/日志/回放（M1 决策不放法术）
+        mp_visible = match_ratio(frame, cfg.hud.mp_bar, base) >= cfg.combat.hp_visible_min
+        mp = measure_bar(frame, cfg.hud.mp_bar, base) if mp_visible else 1.0
 
         # 敌方血条：Boss 固定条优先，其次普通小怪动态浮头血条（区域检测）
         boss_hp = measure_bar(frame, cfg.hud.enemy_hp_bar, base)
@@ -270,6 +275,8 @@ class WukongAdapter:
                 "hp_ratio": hp,
                 "hp_visible": hp_visible,
                 "stamina_ratio": stamina,
+                "mp_ratio": mp,
+                "mp_visible": mp_visible,
                 "gourd_available": gourd,
                 "enemy_hp_ratio": enemy_hp,
                 "enemy_hp_source": enemy_source,

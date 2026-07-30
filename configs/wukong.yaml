@@ -39,6 +39,12 @@ hud:
     hsv_lower: [35, 80, 80]
     hsv_upper: [90, 255, 255]
     column_fill: 0.3
+  mp_bar:                      # 法力条（蓝，法术资源；与 HP 条同显同隐——非战斗隐藏时
+                               # 按 mp_visible=false 处理，mp_ratio 记 1.0，同 hp 模式）
+    rect: [140, 1039, 320, 6]
+    hsv_lower: [100, 80, 80]
+    hsv_upper: [130, 255, 255]
+    column_fill: 0.3
   enemy_hp_bar:                # Boss 固定血条（位置固定，Boss 战出现；与普通小怪动态血条互补，优先采用）
     rect: [660, 950, 600, 6]
     hsv_lower: [0, 120, 80]
@@ -85,7 +91,8 @@ keys:                          # 键位映射（用户自定义键位实机校�
 
 control:
   pixels_per_degree: 12.0      # 鼠标像素 / 转角（实机校准）
-  move_hold_seconds: 0.35      # 移动键按住时长
+  move_mode: hold              # hold=持续按住移动键（顺畅）/ tap=每 tick 点按（旧行为）
+  move_hold_seconds: 0.35      # tap 模式下移动键按住时长
   action_pause: 0.05           # 每次输入后的间隔
   turn_degrees_per_second: 180.0  # 转向角速度（度/秒）：转向按该速度拆小步平滑执行，越大越快
   turn_step_interval: 0.02     # 平滑转向的步进间隔（秒）

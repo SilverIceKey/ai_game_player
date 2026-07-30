@@ -26,6 +26,12 @@ def format_tick(state: GameState, intent: str, action: Action) -> str:
     raw = state.raw
     enemy = raw.get("enemy_hp_ratio")
     enemy_s = f"{float(enemy):.2f}" if isinstance(enemy, (int, float)) else "-"
+    mp = raw.get("mp_ratio")
+    mp_s = (
+        f"{float(mp):.2f}"
+        if raw.get("mp_visible", True) and isinstance(mp, (int, float))
+        else "-"
+    )
     pose = raw.get("pose") or (0.0, 0.0, 0.0)
     degrees = int(round(math.degrees(float(pose[2]))))
     params = " ".join(f"{k}={v}" for k, v in action.params.items())
@@ -33,6 +39,7 @@ def format_tick(state: GameState, intent: str, action: Action) -> str:
         f"state scene={state.scene} "
         f"hp={float(raw.get('hp_ratio') or 0.0):.2f} "
         f"stamina={float(raw.get('stamina_ratio') or 0.0):.2f} "
+        f"mp={mp_s} "
         f"enemy_hp={enemy_s} "
         f"gourd={1 if raw.get('gourd_available') else 0} "
         f"pos=({float(pose[0]):.1f},{float(pose[1]):.1f},{degrees}°)",
@@ -173,6 +180,10 @@ def run(settings: Settings, game: str, game_config_path: Path, max_ticks: int = 
         logger.info("[%s] interrupted by user at tick %d",
                     datetime.now().strftime("%H:%M:%S.%f")[:-3], tick)
     finally:
+        # 松开所有按住的移动键（hold 模式），否则 Ctrl+C 后按键会卡死在按下态
+        release = getattr(controller, "release_all", None)
+        if callable(release):
+            release()
         replay = recorder.export()
         recorder.close()
         logger.info("[%s] session end ticks=%d replay=%s",
