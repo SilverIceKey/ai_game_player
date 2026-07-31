@@ -21,8 +21,11 @@ from core.recorder.jsonl import JsonlRecorder
 _LOG_INDENT = " " * 15  # 与 "[HH:MM:SS.mmm] " 等宽，续行对齐
 
 
-def format_tick(state: GameState, intent: str, action: Action) -> str:
-    """逐 tick 日志（计划文档 3.4 节）：state / intent / action 三行。"""
+def format_tick(state: GameState, intent: str, action: Action, skill: str = "") -> str:
+    """逐 tick 日志（计划文档 3.4 节）：state / intent / action 三行。
+
+    M3：intent 行允许追加 skill=<当前技能> 字段（只追加，不改既有字段）。
+    """
     raw = state.raw
     enemy = raw.get("enemy_hp_ratio")
     enemy_s = f"{float(enemy):.2f}" if isinstance(enemy, (int, float)) else "-"
@@ -43,7 +46,7 @@ def format_tick(state: GameState, intent: str, action: Action) -> str:
         f"enemy_hp={enemy_s} "
         f"gourd={1 if raw.get('gourd_available') else 0} "
         f"pos=({float(pose[0]):.1f},{float(pose[1]):.1f},{degrees}°)",
-        f"intent {intent}",
+        f"intent {intent}" + (f" skill={skill}" if skill else ""),
         f"action {action.name}" + (f" {params}" if params else ""),
     ]
     timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -89,6 +92,26 @@ def build_wukong(game_config_path: Path, dry_run: bool = False):
     return source, adapter, decision, controller, config
 
 
+def build_skills(decision):
+    """由战斗决策器装配技能调度器（M3）。
+
+    包装不是重写：CoverageExplorer / CombatDecision 内部逻辑原样保留。
+    独立成函数便于测试替换（monkeypatch）。
+    """
+    from core.skills.combat import CombatSkill
+    from core.skills.exploration import ExplorationSkill
+    from core.skills.scheduler import SkillScheduler
+
+    return SkillScheduler(ExplorationSkill(decision.explorer), CombatSkill(decision))
+
+
+def build_safety(game_config, on_release):
+    """装配安全监视器（独立成函数便于测试替换）。on_release 为释放输入回调。"""
+    from core.safety import SafetyMonitor
+
+    return SafetyMonitor(game_config.safety, game_config.window.title, on_release=on_release)
+
+
 def run(settings: Settings, game: str, game_config_path: Path, max_ticks: int = 0,
         dry_run: bool = False) -> int:
     run_dir = Path(settings.recorder.output_dir) / datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -121,24 +144,73 @@ def run(settings: Settings, game: str, game_config_path: Path, max_ticks: int = 
                         "（非 Windows 或未找到窗口/被系统拦截）；"
                         "使用 mss 后端时请手动切到游戏窗口", ts)
 
+    # M3 主循环新形态：安全检查 → 截屏 → 感知 → 技能调度 → 仲裁 → 执行 → 记录 → trace
+    from core.control.arbiter import ActionSource, CandidateAction
+    from core.trace import TickTrace
+
+    scheduler = build_skills(decision)
+    arbiter = _build_arbiter(game_config, logger)
+    release = getattr(controller, "release_all", None)
+    safety = build_safety(game_config, release if callable(release) else None)
+    trace = TickTrace()
+
     tick = 0
     prev_fsm = decision.state_name
     saved_first_combat = False
     frame_interval = game_config.dry_run.frame_interval_ticks
     review_cfg = settings.review
     prev_hp: float | None = None
+    prev_safety_detail = ""
     try:
         while True:
             started = time.monotonic()
+
+            # 1. 安全检查：急停/失焦 → 释放输入 + 阻断本 tick 一切动作
+            sstate = safety.check()
+            if sstate.detail != prev_safety_detail:
+                if sstate.detail:
+                    logger.info("[%s] safety: %s", datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                                sstate.detail)
+                prev_safety_detail = sstate.detail
+
+            # 2-3. 截屏 + 感知（frame_id 单调递增）
             frame = source.grab()
             state = adapter.perceive(frame)
-            action = decision.decide(state)
+            state.frame_id = tick
+            t_perceived = time.monotonic()
+
+            # 4-6. 技能调度（含抢占）→ 仲裁
+            blocked = sstate.emergency_stopped or sstate.focus_lost
+            if blocked:
+                action = Action("idle")
+                intent = f"SAFETY: {sstate.detail}"
+                skill_name = "none"
+            else:
+                candidate_action, intent, skill_name = scheduler.step(state, tick)
+                verdict = arbiter.decide([
+                    CandidateAction(candidate_action, ActionSource.SKILL, issued_at=t_perceived)
+                ])
+                if verdict.action is None:
+                    action = Action("idle")
+                    intent += "（动作被仲裁丢弃）"
+                else:
+                    action = verdict.action
+            t_decided = time.monotonic()
+
+            # 7. 执行 → 记录 → 逐 tick 日志（原格式 + skill 字段）
             result = controller.execute(action)
+            t_executed = time.monotonic()
+            trace.add(
+                (t_perceived - started) * 1000.0,
+                (t_decided - t_perceived) * 1000.0,
+                (t_executed - t_decided) * 1000.0,
+            )
             recorder.record(StepRecord(
                 timestamp=state.timestamp, state=state, output=action, result=result.detail,
-                extra={"intent": decision.intent},
+                extra={"intent": intent, "skill": skill_name,
+                       "safety": sstate.detail or None},
             ))
-            logger.info(format_tick(state, decision.intent, action))
+            logger.info(format_tick(state, intent, action, skill=skill_name))
 
             # M2 采样策略（计划 2 节）：事件驱动为主，周期保底，异常加采
             # 事件帧：FSM 状态转移 / 首次接敌
@@ -181,14 +253,25 @@ def run(settings: Settings, game: str, game_config_path: Path, max_ticks: int = 
                     datetime.now().strftime("%H:%M:%S.%f")[:-3], tick)
     finally:
         # 松开所有按住的移动键（hold 模式），否则 Ctrl+C 后按键会卡死在按下态
-        release = getattr(controller, "release_all", None)
         if callable(release):
             release()
         replay = recorder.export()
         recorder.close()
-        logger.info("[%s] session end ticks=%d replay=%s",
-                    datetime.now().strftime("%H:%M:%S.%f")[:-3], tick, replay)
+        # 8. trace 统计落盘 + 日志
+        summary_path = trace.write_summary(run_dir / "trace_summary.txt")
+        for line in trace.render().splitlines():
+            logger.info("[%s] %s", datetime.now().strftime("%H:%M:%S.%f")[:-3], line)
+        logger.info("[%s] session end ticks=%d replay=%s trace=%s",
+                    datetime.now().strftime("%H:%M:%S.%f")[:-3], tick, replay, summary_path)
     return 0
+
+
+def _build_arbiter(game_config, logger):
+    from core.control.arbiter import ActionArbiter
+
+    return ActionArbiter(
+        default_ttl_ms=game_config.control.action_ttl_ms, logger=logger
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

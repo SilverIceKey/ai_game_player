@@ -21,6 +21,7 @@ class ControlParams:
     turn_degrees_per_second: float = 180.0  # 转向角速度（度/秒），平滑转向用
     turn_step_interval: float = 0.02  # 平滑转向的步进间隔（秒）
     move_mode: str = "hold"  # hold=持续按住（顺畅，实机反馈后改默认）/ tap=每 tick 点按（旧行为）
+    action_ttl_ms: float = 500.0  # 动作有效期（毫秒），过期动作仲裁丢弃不执行
 
 
 class DirectInputController:

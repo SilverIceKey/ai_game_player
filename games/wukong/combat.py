@@ -63,6 +63,14 @@ class CombatDecision:
     def state_name(self) -> str:
         return self._machine.current
 
+    @property
+    def return_target(self) -> tuple[float, float] | None:
+        """探索断点（CombatSkill 脱战移交用，M3）。"""
+        return self._return_target
+
+    def clear_return_target(self) -> None:
+        self._return_target = None
+
     def decide(self, state: GameState) -> Action:
         raw = state.raw
         pose = tuple(raw.get("pose") or (0.0, 0.0, 0.0))

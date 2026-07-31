@@ -96,6 +96,11 @@ control:
   action_pause: 0.05           # 每次输入后的间隔
   turn_degrees_per_second: 180.0  # 转向角速度（度/秒）：转向按该速度拆小步平滑执行，越大越快
   turn_step_interval: 0.02     # 平滑转向的步进间隔（秒）
+  action_ttl_ms: 500           # 动作有效期（毫秒）：过期动作仲裁丢弃不执行（M3）
+
+safety:                        # 安全层（M3）：真机发真实输入的必备保护
+  emergency_stop_key: "F12"    # 全局急停键：按下停手并释放全部按键；急停中再按一次恢复
+  stop_on_focus_lost: true     # 游戏窗口失焦立即释放输入并暂停决策
 
 exploration:                   # 覆盖式探索参数
   grid_size_m: 60.0            # 局部栅格边长（局部坐标单位）

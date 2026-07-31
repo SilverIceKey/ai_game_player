@@ -320,10 +320,20 @@ def test_formal_run_sampling_frames(tmp_path, monkeypatch):
         def grab(self):
             return frame
 
+    decision = _SamplingDecision()
+
+    class _FakeScheduler:
+        """薄包装：直接驱动假决策器（M3 调度器接口）。"""
+
+        def step(self, state, tick):
+            action = decision.decide(state)
+            return action, decision.intent, "exploration"
+
     def _fake_build(game_config_path, dry_run=False):
-        return _FakeSource(), _HpDropAdapter(), _SamplingDecision(), NullController(), game_cfg
+        return _FakeSource(), _HpDropAdapter(), decision, NullController(), game_cfg
 
     monkeypatch.setattr(auto_main, "build_wukong", _fake_build)
+    monkeypatch.setattr(auto_main, "build_skills", lambda d: _FakeScheduler())
     settings = Settings(
         runtime=RuntimeConfig(mode="auto", fps=1000.0),
         game=GameRef(name="wukong", window_title="x"),

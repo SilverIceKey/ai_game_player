@@ -14,11 +14,15 @@ class GameState:
     """一帧画面解析出的标准游戏状态。
 
     各游戏的具体字段（血量、体力、敌人位置等）由适配器定义，放入 raw。
+    M3 追加（仅追加不破坏）：frame_id 帧序号；confidence 感知置信度透传
+    （hp_visible 等信号换算，有血条读数=高置信，隐藏降级）。
     """
 
     timestamp: float
     scene: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+    frame_id: int = 0
+    confidence: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass

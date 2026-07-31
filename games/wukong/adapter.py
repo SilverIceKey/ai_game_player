@@ -29,6 +29,7 @@ from core.perception.regions import (
     measure_bar,
 )
 from core.perception.walkable import WalkableAnalyzer, WalkableParams
+from core.safety import SafetyParams
 
 _REQUIRED_KEYS = ("move_forward", "light_attack", "dodge", "heal", "lock_on")
 
@@ -88,6 +89,7 @@ class WukongConfig:
     keys: dict[str, str]
     control: ControlParams
     exploration: ExplorationParams
+    safety: SafetyParams = SafetyParams()
     dry_run: DryRunParams = DryRunParams()
 
     @classmethod
@@ -146,6 +148,7 @@ class WukongConfig:
             keys={str(k): str(v) for k, v in keys.items()},
             control=_params(ControlParams, data.get("control"), "control"),
             exploration=_params(ExplorationParams, data.get("exploration"), "exploration"),
+            safety=_params(SafetyParams, data.get("safety"), "safety"),
             dry_run=_params(DryRunParams, data.get("dry_run"), "dry_run"),
         )
 
@@ -285,6 +288,13 @@ class WukongAdapter:
                 "in_combat": enemy_present,
                 "pose": pose.as_tuple(),
                 "walkable": walk.as_dict(),
+            },
+            # 感知置信度透传（M3）：有血条读数=高置信，隐藏/未检出降级
+            confidence={
+                "hp": 1.0 if hp_visible else 0.2,
+                "mp": 1.0 if mp_visible else 0.2,
+                "stamina": 0.9,
+                "enemy_hp": {"boss": 1.0, "dynamic": 0.8}.get(enemy_source or "", 0.0),
             },
         )
 

@@ -2,35 +2,36 @@
 
 ## 当前状态
 
-- 当前主任务：M2——Ollama 周期复盘与策略调参（代码完成，待实机联调）
-- 当前阶段：Windows + Ollama 实机联调（M1 校准验收并行进行中）
+- 当前主任务：M3——Runtime 对齐（代码完成，待实机验证）
+- 当前阶段：Windows 实机验证（动作连贯性、F12 急停、失焦停手、trace）
 - 当前结论：
-  - M2 全部代码落地，`pytest` 101 passed（Ollama 全 mock）
-  - 采样策略：事件帧 + 周期帧（300 tick≈30s，正式跑也采）+ 异常帧（脱困/hp 骤降），帧与前后 30 tick 操作日志配对
-  - `--review runs/<ts>` 产出复盘摘要 + tuning_suggestion.yaml 补丁（不自动合入）
+  - 说明书评审落盘 `docs/reports/REPORT-20260729-runtime-spec-review-v1.md`：控制面思想吸收，多模型矩阵/蒸馏不做
+  - M3 全部落地，`pytest` 144 passed；主循环已重构为 安全→感知→技能调度（抢占）→仲裁→执行→trace
+  - 说明书原文：`docs/reference/通用视觉游戏 Agent Runtime 技术规格说明书.docx`
 
 ## 本轮改动
 
-- 新增 `docs/plans/PLAN-20260729-m2-ollama-review-v1.md`（已确认）
-- 新增 `llm/providers/ollama_provider.py`、`llm/review/engine.py`、`llm/review/prompts.py`、`llm/tuning/patch.py`
-- 修改 `apps/auto_player/main.py`（正式跑采样落帧 + `--review` 模式）、`core/recorder/jsonl.py`（replay.jsonl + 读取配对）、`core/config.py`（vision_model + review 段）、`core/decision/navigation.py`（unstick_triggered 信号）、`configs/settings.example.yaml`
-- 新增 `tests/test_review.py`（17 例）；适配 replay.jsonl 改名
-- 感知设计修正（M1 计划 3.1a/3.1b）：新增 `core/perception/bars.py`（动态血条检测）、`apps/auto_player/edit_roi.py`（--edit-roi 交互校准）；adapter 改双色动态敌条 + hp_visible；calibrate 适配；pyproject 平台分流 opencv + ruamel.yaml；测试 101 → 115 例
-- 更新 `docs/progress/PROGRESS-20260729-m2-ollama-review-v1.md`
+- 新增 `core/skills/`（base 协议五态、exploration/combat 包装技能、scheduler 抢占调度）
+- 新增 `core/control/arbiter.py`（优先级+TTL+仲裁日志）、`core/safety.py`（F12 急停 toggle、失焦释放）、`core/trace.py`（延迟 P50/P95）
+- 修改 `apps/auto_player/main.py`（主循环重构，日志 intent 行追加 skill=）、`core/contracts.py`（GameState 加 frame_id/confidence 可选字段）、`games/wukong/combat.py`（断点移交只读接口）、`games/wukong/adapter.py`（safety 配置 + confidence 透传）、`configs/wukong.yaml`（safety 段 + action_ttl_ms）
+- 新增测试 24 例（skills/arbiter/safety/trace）
+- 文档：评审报告 + M3 计划 + M3 进度
 
 ## 验证结果
 
-- 已执行：`pytest` 101 passed、`compileall` 通过、`--help` 含 --review
-- 未执行：Ollama 真实调用、视觉模型诊断质量、端到端复盘（需 Windows + Ollama）
-- 证据：`.venv/bin/python -m pytest -q` → 101 passed in 0.91s
+- 已执行：`pytest` 144 passed、`compileall` 通过
+- 未执行：实机动作连贯性、急停/失焦实机行为、trace 实机数据
+- 证据：`.venv/bin/python -m pytest -q` → 144 passed in 1.31s
 
 ## 风险与限制
 
-- Ollama SDK 返回结构、qwen2.5vl:7b 在 2070s 8GB 的加载未验证（游戏退出后跑）
-- 视觉模型诊断质量未知，prompt 或需迭代；hp_drop_alert 可能误采
-- M1 实机风险同前（HUD 校准、光流漂移、CPU 占用）
+- 急停轮询在独占全屏/权限差异下稳定性未知；失焦停手是设计行为（WGC 后台截屏时切窗看日志会停手），实机确认
+- perceive 延迟能否撑住 10fps 未实测（看 trace_summary.txt）
+- 仲裁日志 INFO 级每 tick 一行，长会话体积大
+- settings.yaml 为本地文件：pull 后需对照 example 补新字段（老问题，本轮 wukong.yaml 新增 safety 段在 git 内会自动更新）
 
 ## 下一步
 
-- 用户实机：pull → `pip install -e .` → `ollama pull qwen2.5vl:7b` → 跑一段 → `--review runs/<ts>` 验收
-- M1 实机验收报告补落 docs/reports/
+- 用户实机验证 M3 → 补验收报告（docs/reports/）
+- 后续可选：VLM 低频导航实验、Event Bus/Observation Store（M3 实机结论后再评估）
+- MP 感知已就绪未接决策；法术进决策排期未定
