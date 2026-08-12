@@ -1,25 +1,38 @@
-# 全局配置示例。复制为 settings.yaml 后按本机环境修改。
+# 全局运行配置示例（AI Game Player SPEC v1.0 新 schema）。
+# 复制为 settings.yaml 后按本机环境修改（settings.yaml 已被 gitignore）。
 
-runtime:
-  mode: auto          # auto=全自动 / assist=半自动建议
-  fps: 10             # 感知-决策循环频率；受 2070s 推理预算约束，勿盲目调高
+game: wukong                # 游戏名，对应 configs/<game>.yaml
 
-game:
-  name: wukong
-  window_title: "黑神话：悟空"   # 截屏窗口定位用
+sessions_dir: "sessions/"   # Episode Store 输出根目录（spec §20，体积大已 gitignore）
+dataset_version: "dataset-v001"  # 数据集版本（spec §29：模型必须记录对应 Dataset Version）
 
-recorder:
-  output_dir: "runs/"           # 回放样本输出目录，供 LLM 复盘
+input_device: keyboard_mouse  # 输入设备（spec §10）：keyboard_mouse / gamepad
 
-llm:
-  provider: ollama              # ollama（默认，本地）/ kimi / openai
-  model: "qwen2.5:7b"           # 离线复盘文本模型；游戏运行时不起 LLM，避免抢显存
-  vision_model: "qwen2.5vl:7b"  # 复盘图文模型（帧+操作日志一起送）；游戏退出后跑 7B Q4
-  base_url: "http://localhost:11434"  # kimi/openai 时改为对应端点
-  # api_key 走环境变量 LLM_API_KEY，见 .env.example
+capture:
+  source_fps: 60            # 采集帧率（spec §13 建议起点；写 60fps 视频 CPU 开销高时可调低）
 
-review:                         # M2：Ollama 周期复盘与调参（--review 手动触发）
-  batch_size: 4                 # 每批送模型的帧数（控制上下文与显存峰值）
-  window_ticks: 30              # 帧前后各取多少 tick 的操作日志配对
-  hp_drop_alert: 0.3            # 单 tick 血量跌幅超过该值落异常帧
-  sample_interval_ticks: 300    # 正式跑周期落帧间隔（300 tick ≈ 30 秒 @10fps）
+model:
+  sample_fps: 12            # 模型时间窗采样率（spec §13：Preprocess Worker 按此节奏抽帧）
+  history_frames: 16        # Video History 窗口长度（spec §8.1/§13，≈1330ms @12fps）
+  history_actions: 16       # Action History 窗口长度（spec §8.2）
+  input_width: 384          # 模型输入分辨率（spec §14 建议起点，不建议直接 1080P）
+  input_height: 216
+
+prediction:
+  action_step_ms: 50        # 单步动作时长（spec §13/§15 Action Chunking）
+  future_action_steps: 4    # 一次推理预测的未来步数（spec §13/§15，horizon ≈ 200ms）
+
+labels:
+  action_label_offset_ms: 0  # 人类反应延迟补偿（spec §12，实验搜索 0~250）
+
+sampling:                   # Replay Buffer 四类采样权重（spec §28，初始值仅为搜索起点）
+  historical: 0.50
+  recent: 0.25
+  correction: 0.20
+  rare: 0.05
+
+loss_weights:               # Behavior Cloning loss 权重（spec §23：必须配置化并记录实验）
+  move: 1.0
+  camera: 1.0
+  button: 1.0
+  temporal: 1.0

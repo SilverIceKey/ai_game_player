@@ -23,3 +23,9 @@ tmp/
 
 # 回放样本输出
 runs/
+
+# 本机配置（模板为 configs/settings.example.yaml，复制后按本机环境修改）
+configs/settings.yaml
+
+# 采集会话数据（视频/动作流，体积大）
+sessions/

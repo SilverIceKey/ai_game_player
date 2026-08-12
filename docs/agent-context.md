@@ -2,36 +2,43 @@
 
 ## 当前状态
 
-- 当前主任务：M3——Runtime 对齐（代码完成，待实机验证）
-- 当前阶段：Windows 实机验证（动作连贯性、F12 急停、失焦停手、trace）
+- 当前主任务：SPEC v1.0 全量重构（本轮代码落地完成）
+- 当前阶段：待 Windows 实机验证（spec §42 Phase 0：Video ↔ Action 同步误差实测 <10ms）
 - 当前结论：
-  - 说明书评审落盘 `docs/reports/REPORT-20260729-runtime-spec-review-v1.md`：控制面思想吸收，多模型矩阵/蒸馏不做
-  - M3 全部落地，`pytest` 144 passed；主循环已重构为 安全→感知→技能调度（抢占）→仲裁→执行→trace
-  - 说明书原文：`docs/reference/通用视觉游戏 Agent Runtime 技术规格说明书.docx`
+  - 项目方向已整体切换：端到端 Video-Action Policy（唯一权威规格 `docs/AI_Game_Player_SPEC_v1.0.md`）
+  - 旧路线（ROI 感知 + FSM 决策 + LLM 复盘）已全部删除，文档归档 `docs/archive/20260729-legacy-runtime/`，不做向前兼容
+  - 新骨架按 spec §48 落成：OBSERVE_TRAIN / AUTOPILOT 双模式链路全通（模型本体为占位 Policy，未引入 torch）
 
 ## 本轮改动
 
-- 新增 `core/skills/`（base 协议五态、exploration/combat 包装技能、scheduler 抢占调度）
-- 新增 `core/control/arbiter.py`（优先级+TTL+仲裁日志）、`core/safety.py`（F12 急停 toggle、失焦释放）、`core/trace.py`（延迟 P50/P95）
-- 修改 `apps/auto_player/main.py`（主循环重构，日志 intent 行追加 skill=）、`core/contracts.py`（GameState 加 frame_id/confidence 可选字段）、`games/wukong/combat.py`（断点移交只读接口）、`games/wukong/adapter.py`（safety 配置 + confidence 透传）、`configs/wukong.yaml`（safety 段 + action_ttl_ms）
-- 新增测试 24 例（skills/arbiter/safety/trace）
-- 文档：评审报告 + M3 计划 + M3 进度
+- 新增包：`capture/`（统一时钟 §11、NormalizedAction §9、mss/WGC 截屏、pynput 键鼠 + XInput 手柄采集）、`dataset/`（Episode Store §20、样本构造 §22/§12、Replay Buffer §28、版本 §29）、`runtime/`（§30 线程组件、Safety Filter §39/§40/§26/§47、键鼠执行器）、`model/ train/ evaluation/ observability/`（协议与骨架）、`app/`（observe_train / autopilot 两个 CLI）
+- 删除：`llm/ apps/ games/ core/` 全部 + 22 个旧测试 + `.env.example`
+- 配置：`config.py` 新 schema；`configs/settings.example.yaml` 与 `configs/wukong.yaml` 重写；pyproject 新包名 + pynput
+- 修复：`dataset/episode_store.py` 帧索引/动作流改逐条 flush（防崩溃丢同步数据）
+- 文档：README 重写、计划 `docs/plans/PLAN-20260812-spec-v1-refactor-v1.md`、进度 `docs/progress/PROGRESS-20260812-spec-v1-refactor-v1.md`
 
 ## 验证结果
 
-- 已执行：`pytest` 144 passed、`compileall` 通过
-- 未执行：实机动作连贯性、急停/失焦实机行为、trace 实机数据
-- 证据：`.venv/bin/python -m pytest -q` → 144 passed in 1.31s
+- 已执行：`pytest` 270 passed、compileall、两个 CLI `--help` 正常
+- 未执行：Windows 实机（截屏/输入/手柄/同步误差/SHADOW 全部待实测）
+- 证据：`.venv/bin/python -m pytest tests/ -q` → 270 passed
 
 ## 风险与限制
 
-- 急停轮询在独占全屏/权限差异下稳定性未知；失焦停手是设计行为（WGC 后台截屏时切窗看日志会停手），实机确认
-- perceive 延迟能否撑住 10fps 未实测（看 trace_summary.txt）
-- 仲裁日志 INFO 级每 tick 一行，长会话体积大
-- settings.yaml 为本地文件：pull 后需对照 example 补新字段（老问题，本轮 wukong.yaml 新增 safety 段在 git 内会自动更新）
+- 同步误差 <10ms（§11）未实测——实机第一验证项
+- pynput 全屏捕获率、鼠标差分 vs raw input、XInput 摇杆方向约定、60fps cv2 写入开销均未实测
+- wukong.yaml 中标注"实机校准"的键位与 executor.pixels_per_unit 必须实机核对
+- 手柄输出（ViGEm）、torch 训练、卡墙/震荡检测为接口预留未实现
 
 ## 下一步
 
-- 用户实机验证 M3 → 补验收报告（docs/reports/）
-- 后续可选：VLM 低频导航实验、Event Bus/Observation Store（M3 实机结论后再评估）
-- MP 感知已就绪未接决策；法术进决策排期未定
+1. Windows 实机：`python -m app.observe_train --game wukong` 采集首段数据，实测同步误差（Phase 0）
+2. 实机校准键位后试 `app.autopilot --dry-run` 与 `--shadow`
+3. 数据 30~60 分钟后引入 torch 实现 model/train（Phase 1 tiny overfit）
+
+## 阅读顺序
+
+1. `docs/AI_Game_Player_SPEC_v1.0.md`（唯一权威规格）
+2. `docs/plans/PLAN-20260812-spec-v1-refactor-v1.md`（本轮重构计划：复用/弃用清单与关键设计决策）
+3. `docs/progress/PROGRESS-20260812-spec-v1-refactor-v1.md`（最新进度）
+4. 代码入口：`app/observe_train.py`、`app/autopilot.py` → 契约 `capture/action.py`、`config.py`

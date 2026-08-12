@@ -2,11 +2,21 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "auto_player (wukong)",
+      "name": "observe_train (wukong)",
       "type": "debugpy",
       "request": "launch",
-      "module": "apps.auto_player",
+      "module": "app.observe_train",
       "args": ["--game", "wukong"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "autopilot (wukong, dry-run)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "app.autopilot",
+      "args": ["--game", "wukong", "--dry-run"],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "justMyCode": true
