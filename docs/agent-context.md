@@ -2,43 +2,43 @@
 
 ## 当前状态
 
-- 当前主任务：SPEC v1.0 全量重构（本轮代码落地完成）
-- 当前阶段：待 Windows 实机验证（spec §42 Phase 0：Video ↔ Action 同步误差实测 <10ms）
+- 当前主任务：音频模态加入（spec §8.5）——代码完成，待游戏机实机验证；**开启 audio 后旧录制数据不可用，需重新采集**
+- 当前阶段：用户已实机录制首段数据（无音频）；训练在 Windows 游戏机（CUDA）本地跑
 - 当前结论：
-  - 项目方向已整体切换：端到端 Video-Action Policy（唯一权威规格 `docs/AI_Game_Player_SPEC_v1.0.md`）
-  - 旧路线（ROI 感知 + FSM 决策 + LLM 复盘）已全部删除，文档归档 `docs/archive/20260729-legacy-runtime/`，不做向前兼容
-  - 新骨架按 spec §48 落成：OBSERVE_TRAIN / AUTOPILOT 双模式链路全通（模型本体为占位 Policy，未引入 torch）
+  - 项目方向：端到端 Video-Action Policy（唯一权威规格 `docs/AI_Game_Player_SPEC_v1.0.md`）
+  - 旧路线已全部删除归档（`docs/archive/20260729-legacy-runtime/`），不做向前兼容
+  - 采集/推理/训练三链路全部可用：`app.observe_train`（采集 + --shadow）、`app.train`（训练）、`app.autopilot`（--checkpoint 加载真实模型）
+  - 音频模态（§8.5）全链路落地：loopback 采集 → episode wav → log-mel → 可选 CNN 分支 → 推理 PCM 输入；默认关闭
 
-## 本轮改动
+## 本轮改动（2026-08-13 音频模态）
 
-- 新增包：`capture/`（统一时钟 §11、NormalizedAction §9、mss/WGC 截屏、pynput 键鼠 + XInput 手柄采集）、`dataset/`（Episode Store §20、样本构造 §22/§12、Replay Buffer §28、版本 §29）、`runtime/`（§30 线程组件、Safety Filter §39/§40/§26/§47、键鼠执行器）、`model/ train/ evaluation/ observability/`（协议与骨架）、`app/`（observe_train / autopilot 两个 CLI）
-- 删除：`llm/ apps/ games/ core/` 全部 + 22 个旧测试 + `.env.example`
-- 配置：`config.py` 新 schema；`configs/settings.example.yaml` 与 `configs/wukong.yaml` 重写；pyproject 新包名 + pynput
-- 修复：`dataset/episode_store.py` 帧索引/动作流改逐条 flush（防崩溃丢同步数据）
-- 文档：README 重写、计划 `docs/plans/PLAN-20260812-spec-v1-refactor-v1.md`、进度 `docs/progress/PROGRESS-20260812-spec-v1-refactor-v1.md`
+- spec §8.5 + §48 更新；计划 `docs/plans/PLAN-20260813-audio-modality-v1.md`
+- `capture/audio.py`（WASAPI loopback，soundcard 延迟导入）、`dataset/episode_store.py`（每 episode wav + 时间窗切片读取）、`model/audio_features.py`（numpy log-mel）
+- `VideoActionNet` 可选音频分支（checkpoint meta `audio` 段驱动重建）；`AudioRingBuffer` + InferenceWorker/两个 app 入口装配
+- `config.py` 加 AudioConfig（默认关）；pyproject 加 soundcard（win32）
+- 测试 310 全绿（新增 tests/test_audio.py 13 例）
 
 ## 验证结果
 
-- 已执行：`pytest` 270 passed、compileall、两个 CLI `--help` 正常
-- 未执行：Windows 实机（截屏/输入/手柄/同步误差/SHADOW 全部待实测）
-- 证据：`.venv/bin/python -m pytest tests/ -q` → 270 passed
+- 已执行：`pytest` 310 passed、compileall
+- 未执行：WASAPI loopback 真实采集与带音频真实训练（开发机无声卡/无 GPU）
+- 证据：`.venv/bin/python -m pytest -q` → 310 passed
 
 ## 风险与限制
 
-- 同步误差 <10ms（§11）未实测——实机第一验证项
-- pynput 全屏捕获率、鼠标差分 vs raw input、XInput 摇杆方向约定、60fps cv2 写入开销均未实测
-- wukong.yaml 中标注"实机校准"的键位与 executor.pixels_per_unit 必须实机核对
-- 手柄输出（ViGEm）、torch 训练、卡墙/震荡检测为接口预留未实现
+- 独占音频模式游戏 loopback 可能抓不到（备选虚拟声卡）；音频↔帧同步偏差假设为常量未实测
+- 训练后 audio 参数（sample_rate/mels/fft/hop）不可改（checkpoint 快照重建）
+- 既有风险不变：mp4v 有损帧、DataLoader 吞吐、Action History mean-pool 表达力
 
 ## 下一步
 
-1. Windows 实机：`python -m app.observe_train --game wukong` 采集首段数据，实测同步误差（Phase 0）
-2. 实机校准键位后试 `app.autopilot --dry-run` 与 `--shadow`
-3. 数据 30~60 分钟后引入 torch 实现 model/train（Phase 1 tiny overfit）
+1. 游戏机 `pip install soundcard` + settings.yaml 开 `audio.enabled: true` → OBSERVE_TRAIN 重录
+2. `python -m app.train` 训练 → AUTOPILOT 实机验证（Phase 1 判据不变）
+3. 不带音频的 Phase 1 也可先用旧数据跑通（audio 默认关，两条路互不阻塞）
 
 ## 阅读顺序
 
-1. `docs/AI_Game_Player_SPEC_v1.0.md`（唯一权威规格）
-2. `docs/plans/PLAN-20260812-spec-v1-refactor-v1.md`（本轮重构计划：复用/弃用清单与关键设计决策）
-3. `docs/progress/PROGRESS-20260812-spec-v1-refactor-v1.md`（最新进度）
-4. 代码入口：`app/observe_train.py`、`app/autopilot.py` → 契约 `capture/action.py`、`config.py`
+1. `docs/AI_Game_Player_SPEC_v1.0.md`（唯一权威规格，含 §8.5 Audio History）
+2. `docs/plans/PLAN-20260813-audio-modality-v1.md`（音频设计决策）、`PLAN-20260813-training-pipeline-v1.md`（训练设计决策）
+3. `docs/progress/PROGRESS-20260813-audio-modality-v1.md`（最新进度）
+4. 代码入口：`app/train.py`、`app/observe_train.py`、`app/autopilot.py` → 契约 `capture/action.py`、`capture/audio.py`、`config.py`

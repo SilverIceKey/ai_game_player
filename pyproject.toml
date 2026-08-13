@@ -15,11 +15,13 @@ dependencies = [
     "pydirectinput",
     "pynput",
     "pyyaml",
+    "soundcard; sys_platform == 'win32'",
     "windows-capture>=1.5,<2; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+train = ["torch", "torchvision"]
 
 [tool.setuptools]
 py-modules = ["config"]

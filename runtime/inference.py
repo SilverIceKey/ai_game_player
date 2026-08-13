@@ -5,6 +5,11 @@
 
 policy 为鸭子类型（禁止 import model/ 包，避免依赖方向倒置）：
     policy.predict(frames: list[np.ndarray], action_history: list[NormalizedAction]) -> ActionChunk
+    （注入 audio_buffer 时追加第三个位置参数 audio_pcm，见下）
+
+音频（spec §8.5）：注入 audio_buffer 时，infer_once 额外切出与 Video History
+对齐的过去窗口 PCM 传给 policy（mel 特征提取在 policy 内部，与训练共用
+model/audio_features.py）。
 
 明确语义：窗口帧数不足 history_frames 时 infer_once 返回 None（不推理、
 不产生任何输出），由调用方决定等待或跳过。
@@ -17,7 +22,7 @@ from collections.abc import Callable
 from capture.action import ActionChunk
 from capture.clock import now_us
 from config import PredictionConfig
-from runtime.ring_buffer import ActionHistoryBuffer, FrameRingBuffer
+from runtime.ring_buffer import ActionHistoryBuffer, AudioRingBuffer, FrameRingBuffer
 
 
 class InferenceWorker:
@@ -31,15 +36,21 @@ class InferenceWorker:
         history_frames: int,
         history_actions: int,
         prediction: PredictionConfig | None = None,
+        audio_buffer: AudioRingBuffer | None = None,
+        audio_window_us: int = 0,
     ):
         if history_frames <= 0:
             raise ValueError(f"history_frames 必须为正整数: {history_frames!r}")
+        if audio_buffer is not None and audio_window_us <= 0:
+            raise ValueError(f"注入 audio_buffer 时 audio_window_us 必须为正: {audio_window_us!r}")
         self._policy = policy
         self._frame_buffer = frame_buffer
         self._action_history = action_history
         self._history_frames = history_frames
         self._history_actions = history_actions
         self._prediction = prediction or PredictionConfig()
+        self._audio_buffer = audio_buffer
+        self._audio_window_us = audio_window_us
 
     def infer_once(self, now_us_value: int) -> tuple[ActionChunk, dict] | None:
         """取窗口 → policy.predict → 记录耗时。窗口不足返回 None。
@@ -57,7 +68,11 @@ class InferenceWorker:
         newest_ts = window[-1][1]
         history = self._action_history.recent(self._history_actions)
         t1 = now_us()
-        chunk = self._policy.predict(frames, history)
+        if self._audio_buffer is not None:
+            audio_pcm = self._audio_buffer.window(newest_ts - self._audio_window_us, self._audio_window_us)
+            chunk = self._policy.predict(frames, history, audio_pcm)
+        else:
+            chunk = self._policy.predict(frames, history)
         t2 = now_us()
 
         stats = {

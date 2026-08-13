@@ -24,6 +24,7 @@ from app.common import (
     new_session_id,
     resolve_settings_path,
 )
+from capture.audio import AudioCapture, run_capture_loop
 from capture.clock import now_us
 from capture.input.base import InputCapture
 from config import GameConfig, Settings
@@ -168,6 +169,7 @@ class ObserveTrainSession:
         writer: EpisodeStoreWriter,
         hotkey: EpisodeHotkey | None = None,
         shadow: ShadowRunner | None = None,
+        audio_capture: AudioCapture | None = None,
     ):
         self._settings = settings
         self._source = source
@@ -175,6 +177,7 @@ class ObserveTrainSession:
         self._writer = writer
         self._hotkey = hotkey
         self._shadow = shadow
+        self._audio_capture = audio_capture
         self._writer_lock = threading.Lock()
         self._episode_active = False
         self._stop_event = threading.Event()
@@ -253,6 +256,14 @@ class ObserveTrainSession:
             if self._shadow is not None:
                 self._shadow.note_action(record)
 
+    def _on_audio_chunk(self, chunk_start_us: int, pcm) -> None:
+        """音频块回调（spec §8.5）：仅 episode 进行中写入当前 episode 的 wav。"""
+        if not self._episode_active:
+            return
+        with self._writer_lock:
+            if self._episode_active:  # 复核：begin/end 与回调并发
+                self._writer.write_audio_chunk(pcm, chunk_start_us)
+
     # ---------- 生命周期 ----------
 
     def start(self) -> None:
@@ -275,6 +286,15 @@ class ObserveTrainSession:
                     args=(self._stop_event,),
                     daemon=True,
                     name="episode-hotkey",
+                )
+            )
+        if self._audio_capture is not None:
+            self._threads.append(
+                threading.Thread(
+                    target=run_capture_loop,
+                    args=(self._audio_capture, self._on_audio_chunk, self._stop_event),
+                    daemon=True,
+                    name="audio-capture",
                 )
             )
         if self._shadow is not None:
@@ -357,6 +377,21 @@ def main(argv: list[str] | None = None) -> int:
     except (RuntimeError, ValueError) as exc:
         raise SystemExit(f"[{_PROG}] 启动失败: {exc}") from exc
 
+    # 音频采集（spec §8.5）：开启时先探针验证 loopback 设备可用，失败即明确退出
+    audio_capture = None
+    if settings.audio.enabled:
+        from capture.audio import SoundcardLoopbackCapture
+
+        audio_capture = SoundcardLoopbackCapture(settings.audio.sample_rate)
+        try:
+            audio_capture.open()
+            audio_capture.close()
+        except Exception as exc:
+            raise SystemExit(
+                f"[{_PROG}] 音频采集不可用（audio.enabled=true 需要 Windows "
+                f"WASAPI loopback 设备）: {exc}"
+            ) from exc
+
     session_dir = Path(settings.sessions_dir) / new_session_id()
     writer = EpisodeStoreWriter(
         session_dir,
@@ -367,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
         capture_fps=settings.capture.source_fps,
         input_device=settings.input_device,
         dataset_version=settings.dataset_version,
+        audio_sample_rate=settings.audio.sample_rate if settings.audio.enabled else None,
     )
 
     shadow = None
@@ -390,6 +426,7 @@ def main(argv: list[str] | None = None) -> int:
         input_capture=input_capture,
         writer=writer,
         shadow=shadow,
+        audio_capture=audio_capture,
     )
     hotkey = EpisodeHotkey(
         game_config.safety.episode_key,

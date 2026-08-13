@@ -67,6 +67,28 @@ class LossWeights:
 
 
 @dataclass(frozen=True)
+class AudioConfig:
+    """音频模态参数（spec §8.5，默认关闭）。"""
+
+    enabled: bool = False
+    sample_rate: int = 16000
+    mels: int = 64
+    fft_size: int = 400  # 25ms @16kHz
+    hop_size: int = 160  # 10ms @16kHz
+
+
+@dataclass(frozen=True)
+class TrainingConfig:
+    """训练超参（写入 checkpoint meta.training_config，spec §29 可复现）。"""
+
+    epochs: int = 10
+    batch_size: int = 32
+    lr: float = 1e-3
+    camera_bins: int = 21  # spec §19.2：Camera Head 离散分布（每轴 bin 数，奇数含 0 位）
+    train_stage: str = "freeze_backbone"  # spec §18 三阶段：freeze_backbone / unfreeze_last / full
+
+
+@dataclass(frozen=True)
 class Settings:
     game: str
     sessions_dir: str = "sessions/"
@@ -78,6 +100,8 @@ class Settings:
     labels: LabelsConfig = LabelsConfig()
     sampling: SamplingConfig = SamplingConfig()
     loss_weights: LossWeights = LossWeights()
+    training: TrainingConfig = TrainingConfig()
+    audio: AudioConfig = AudioConfig()
 
 
 # ---------- 游戏专属配置 ----------
@@ -221,6 +245,37 @@ def load_settings(path: str | Path) -> Settings:
             button=_non_negative_float(loss.get("button", 1.0), "loss_weights.button"),
             temporal=_non_negative_float(loss.get("temporal", 1.0), "loss_weights.temporal"),
         ),
+        training=_load_training(_section(data, "training")),
+        audio=_load_audio(_section(data, "audio")),
+    )
+
+
+def _load_audio(audio: dict[str, Any]) -> AudioConfig:
+    return AudioConfig(
+        enabled=bool(audio.get("enabled", False)),
+        sample_rate=_positive_int(audio.get("sample_rate", 16000), "audio.sample_rate"),
+        mels=_positive_int(audio.get("mels", 64), "audio.mels"),
+        fft_size=_positive_int(audio.get("fft_size", 400), "audio.fft_size"),
+        hop_size=_positive_int(audio.get("hop_size", 160), "audio.hop_size"),
+    )
+
+
+def _load_training(training: dict[str, Any]) -> TrainingConfig:
+    stage = training.get("train_stage", "freeze_backbone")
+    if stage not in ("freeze_backbone", "unfreeze_last", "full"):
+        raise ConfigError(
+            f"training.train_stage 非法: {stage!r}"
+            "（仅支持 freeze_backbone/unfreeze_last/full，spec §18）"
+        )
+    camera_bins = _positive_int(training.get("camera_bins", 21), "training.camera_bins")
+    if camera_bins % 2 == 0:
+        raise ConfigError(f"training.camera_bins 必须为奇数（含 0 位）: {camera_bins}")
+    return TrainingConfig(
+        epochs=_positive_int(training.get("epochs", 10), "training.epochs"),
+        batch_size=_positive_int(training.get("batch_size", 32), "training.batch_size"),
+        lr=_positive_float(training.get("lr", 1e-3), "training.lr"),
+        camera_bins=camera_bins,
+        train_stage=stage,
     )
 
 

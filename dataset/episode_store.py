@@ -6,9 +6,10 @@ Session 目录结构（写入方按此布局落盘，读取方按此布局解析
 sessions/<session_id>/
 ├── manifest.json      # §20.1：session_id/mode/game/capture/input_device/dataset_version/labels.quality
 ├── video/episode_000.mp4  # 每个 episode 一个视频文件（cv2.VideoWriter, mp4v）
+├── audio/episode_000.wav  # 每个 episode 一个音频文件（PCM s16 mono，仅 audio 开启时存在，§8.5）
 ├── frames.idx         # JSONL：{"episode", "frame_id", "timestamp_us", "video_offset"}
 ├── actions.bin        # ActionRecord.pack() 定长记录追加（§20.3：高频动作用 binary）
-├── episodes.json      # episode 元信息：[{episode_id, start_us, end_us, source, video_path}]
+├── episodes.json      # episode 元信息：[{episode_id, start_us, end_us, source, video_path, audio_path?, audio_start_us?}]
 └── telemetry.jsonl    # 运行遥测（内容由调用方决定）
 ```
 
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import wave
 from pathlib import Path
 from typing import Any, Callable
 
@@ -41,6 +43,7 @@ _EPISODES_JSON = "episodes.json"
 _MANIFEST_JSON = "manifest.json"
 _TELEMETRY_JSONL = "telemetry.jsonl"
 _VIDEO_DIR = "video"
+_AUDIO_DIR = "audio"
 
 
 class EpisodeStoreWriter:
@@ -62,20 +65,26 @@ class EpisodeStoreWriter:
         input_device: str,
         dataset_version: str,
         labels_quality: str = "unreviewed",
+        audio_sample_rate: int | None = None,
     ) -> None:
         self.session_dir = Path(session_dir)
         self.session_id = self.session_dir.name
         self._width = int(capture_width)
         self._height = int(capture_height)
         self._fps = float(capture_fps)
+        self._audio_sr = int(audio_sample_rate) if audio_sample_rate is not None else None
 
         (self.session_dir / _VIDEO_DIR).mkdir(parents=True, exist_ok=True)
+        capture_meta: dict[str, Any] = {"width": self._width, "height": self._height, "fps": self._fps}
+        if self._audio_sr is not None:
+            (self.session_dir / _AUDIO_DIR).mkdir(parents=True, exist_ok=True)
+            capture_meta["audio"] = {"sample_rate": self._audio_sr, "channels": 1}
         # manifest 构造即落盘（§20.1）
         manifest = {
             "session_id": self.session_id,
             "mode": mode,
             "game": game,
-            "capture": {"width": self._width, "height": self._height, "fps": self._fps},
+            "capture": capture_meta,
             "input_device": input_device,
             "dataset_version": dataset_version,
             "labels": {"quality": labels_quality},
@@ -92,6 +101,7 @@ class EpisodeStoreWriter:
         self._frame_id = 0  # 全 session 递增
         self._video_offset = 0  # 当前 episode 视频内的帧序号
         self._video_writer: cv2.VideoWriter | None = None
+        self._audio_fp: wave.Wave_write | None = None
         self._active: dict[str, Any] | None = None  # 当前 episode 的起始信息
         self._last_frame_us: int | None = None
         self._closed = False
@@ -128,10 +138,19 @@ class EpisodeStoreWriter:
             "source": source,
             "video_path": video_rel,
         }
+        if self._audio_sr is not None:
+            audio_rel = f"{_AUDIO_DIR}/episode_{episode_id:03d}.wav"
+            fp = wave.open(str(self.session_dir / audio_rel), "wb")
+            fp.setnchannels(1)
+            fp.setsampwidth(2)  # PCM s16
+            fp.setframerate(self._audio_sr)
+            self._audio_fp = fp
+            self._active["audio_path"] = audio_rel
+            # audio_start_us 由首个音频块到达时确定（采集线程可能略晚于 begin_episode）
         return episode_id
 
     def end_episode(self, end_us: int) -> dict[str, Any]:
-        """结束当前 episode：释放视频写入器并把元信息追加到 episodes.json。"""
+        """结束当前 episode：释放视频/音频写入器并把元信息追加到 episodes.json。"""
         self._ensure_open()
         if self._active is None:
             raise RuntimeError("当前没有进行中的 episode，不能 end_episode")
@@ -139,6 +158,9 @@ class EpisodeStoreWriter:
         assert self._video_writer is not None
         self._video_writer.release()
         self._video_writer = None
+        if self._audio_fp is not None:
+            self._audio_fp.close()
+            self._audio_fp = None
         self._active = None
         self._episodes.append(meta)
         self._flush_episodes_json()
@@ -186,6 +208,24 @@ class EpisodeStoreWriter:
         """追加一条遥测 JSONL（字段内容由调用方决定）。"""
         self._ensure_open()
         self._telemetry_fp.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+    def write_audio_chunk(self, pcm_f32: np.ndarray, chunk_start_us: int) -> None:
+        """追加一块 mono float32 PCM 到当前 episode 的 wav（§8.5）。
+
+        chunk_start_us 为该块第一个采样点的时间戳；本 episode 的首个块
+        确定 episode meta 的 audio_start_us（wav 第 0 个采样点对应时刻）。
+        """
+        self._ensure_open()
+        if self._active is None or self._audio_fp is None:
+            raise RuntimeError(
+                "write_audio_chunk 必须在 begin_episode 之后调用（当前无进行中 episode 或音频未开启）"
+            )
+        if pcm_f32.ndim != 1:
+            raise ValueError(f"音频块必须是 mono 一维数组，实际 shape={pcm_f32.shape}")
+        if "audio_start_us" not in self._active:
+            self._active["audio_start_us"] = int(chunk_start_us)
+        s16 = (np.clip(pcm_f32, -1.0, 1.0) * 32767).astype("<i2")
+        self._audio_fp.writeframes(s16.tobytes())
 
     # ---------- 收尾 ----------
 
@@ -320,6 +360,40 @@ class EpisodeStoreReader:
         """按 frames.idx 记录加载帧图像（经注入的 frame_loader）。"""
         video_path = self.session_dir / f"{_VIDEO_DIR}/episode_{int(frame_record['episode']):03d}.mp4"
         return self._frame_loader(video_path, int(frame_record["video_offset"]))
+
+    def audio_sample_rate(self) -> int | None:
+        """manifest 中声明的音频采样率；audio 未开启时返回 None。"""
+        audio = self.manifest().get("capture", {}).get("audio")
+        return int(audio["sample_rate"]) if audio else None
+
+    def load_audio_window(
+        self, episode: dict[str, Any], start_us: int, duration_us: int
+    ) -> np.ndarray:
+        """按时间窗切出 episode 音频，返回 float32 mono（窗口外部分零填充）。
+
+        episode 为 episodes() 返回的元信息（需含 audio_path/audio_start_us）。
+        """
+        sr = self.audio_sample_rate()
+        if sr is None or "audio_path" not in episode:
+            raise ValueError(
+                f"episode {episode.get('episode_id')} 无音频数据（录制时 audio.enabled 未开启）"
+            )
+        if "audio_start_us" not in episode:
+            raise ValueError(f"episode {episode.get('episode_id')} 无任何音频块")
+        if duration_us <= 0:
+            raise ValueError(f"duration_us 必须为正: {duration_us}")
+        n = max(1, int(round(duration_us * sr / 1e6)))
+        audio_start = int(episode["audio_start_us"])
+        req_lo = int((int(start_us) - audio_start) * sr / 1e6)
+        out = np.zeros(n, dtype=np.float32)
+        with wave.open(str(self.session_dir / episode["audio_path"]), "rb") as fp:
+            total = fp.getnframes()
+            lo, hi = max(0, req_lo), min(total, req_lo + n)
+            if hi > lo:
+                fp.setpos(lo)
+                s16 = np.frombuffer(fp.readframes(hi - lo), dtype="<i2")
+                out[lo - req_lo : lo - req_lo + len(s16)] = s16.astype(np.float32) / 32767.0
+        return out
 
     # ---------- 内部 ----------
 

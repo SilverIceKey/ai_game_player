@@ -82,3 +82,48 @@ class ActionHistoryBuffer:
         with self._lock:
             records = list(self._records)
         return [r.action for r in records[-n:]]
+
+
+class AudioRingBuffer:
+    """音频环形缓冲（spec §8.5 Audio History）：元素为 (chunk_start_us, pcm_f32 mono)。
+
+    容量按采样点数控制，满则丢最旧的整块；window() 按时间窗切片，
+    缓冲覆盖不到的部分零填充（与训练侧 load_audio_window 的语义一致）。
+    """
+
+    def __init__(self, capacity_seconds: float, sample_rate: int):
+        if capacity_seconds <= 0:
+            raise ValueError(f"capacity_seconds 必须为正数: {capacity_seconds!r}")
+        self._sr = int(sample_rate)
+        self._max_samples = int(capacity_seconds * self._sr)
+        self._chunks: deque[tuple[int, np.ndarray]] = deque()
+        self._total = 0
+        self._lock = threading.Lock()
+
+    def push(self, chunk_start_us: int, pcm: np.ndarray) -> None:
+        pcm = np.asarray(pcm, dtype=np.float32)
+        with self._lock:
+            self._chunks.append((int(chunk_start_us), pcm))
+            self._total += len(pcm)
+            while self._total > self._max_samples and len(self._chunks) > 1:
+                _, old = self._chunks.popleft()
+                self._total -= len(old)
+
+    def window(self, start_us: int, duration_us: int) -> np.ndarray:
+        """切出 [start_us, start_us+duration_us) 的 float32 mono，未覆盖部分零填充。"""
+        n = max(1, int(round(duration_us * self._sr / 1e6)))
+        with self._lock:
+            chunks = list(self._chunks)
+        out = np.zeros(n, dtype=np.float32)
+        end_us = start_us + duration_us
+        for chunk_start, pcm in chunks:
+            chunk_end = chunk_start + int(len(pcm) * 1e6 / self._sr)
+            lo, hi = max(start_us, chunk_start), min(end_us, chunk_end)
+            if hi <= lo:
+                continue
+            src_lo = int((lo - chunk_start) * self._sr / 1e6)
+            src_hi = int((hi - chunk_start) * self._sr / 1e6)
+            dst_lo = int((lo - start_us) * self._sr / 1e6)
+            seg = pcm[src_lo:src_hi]
+            out[dst_lo : dst_lo + len(seg)] = seg
+        return out

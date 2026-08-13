@@ -40,17 +40,19 @@ from app.common import (
     resolve_settings_path,
 )
 from capture.action import SOURCE_AI, SOURCE_CORRECTION, ActionRecord
+from capture.audio import AudioCapture, run_capture_loop
 from capture.clock import now_us
 from capture.input.base import InputCapture
 from config import GameConfig, Settings
 from dataset.episode_store import EpisodeStoreWriter
 from evaluation.closed_loop import ClosedLoopMetrics
+from model.audio_features import audio_window_us
 from observability.logs import InferenceLogger
 from observability.metrics import LatencyStats, RuntimeCounters
 from runtime.action_scheduler import ActionScheduler
 from runtime.inference import InferenceWorker
 from runtime.preprocess import preprocess_frame
-from runtime.ring_buffer import ActionHistoryBuffer, FrameRingBuffer
+from runtime.ring_buffer import ActionHistoryBuffer, AudioRingBuffer, FrameRingBuffer
 from runtime.safety_filter import MODE_AI_CONTROL, MODE_HUMAN_OVERRIDE, SafetyFilter
 
 _PROG = "autopilot"
@@ -77,6 +79,7 @@ class AutopilotSession:
         safety: SafetyFilter,
         inference_logger: InferenceLogger | None = None,
         scheduler: ActionScheduler | None = None,
+        audio_capture: AudioCapture | None = None,
         frame_queue_size: int = 2,
     ):
         self._settings = settings
@@ -87,6 +90,7 @@ class AutopilotSession:
         self._writer = writer
         self._safety = safety
         self._inference_logger = inference_logger
+        self._audio_capture = audio_capture
 
         model = settings.model
         self._frame_queue: queue.Queue[tuple[np.ndarray, int]] = queue.Queue(
@@ -94,6 +98,15 @@ class AutopilotSession:
         )
         self._frame_buffer = FrameRingBuffer(model.history_frames)
         self._action_history = ActionHistoryBuffer(model.history_actions)
+        # 音频（spec §8.5）：注入 audio_capture 时建环形缓冲，推理窗口与 Video History 对齐
+        self._audio_buffer: AudioRingBuffer | None = None
+        audio_win_us = 0
+        if audio_capture is not None:
+            audio_win_us = audio_window_us(model.history_frames, model.sample_fps)
+            self._audio_buffer = AudioRingBuffer(
+                capacity_seconds=2 * audio_win_us / 1e6,
+                sample_rate=settings.audio.sample_rate,
+            )
         self._worker = InferenceWorker(
             policy,
             self._frame_buffer,
@@ -101,6 +114,8 @@ class AutopilotSession:
             history_frames=model.history_frames,
             history_actions=model.history_actions,
             prediction=settings.prediction,
+            audio_buffer=self._audio_buffer,
+            audio_window_us=audio_win_us,
         )
         self.scheduler = scheduler or ActionScheduler(settings.prediction.action_step_ms)
 
@@ -269,6 +284,13 @@ class AutopilotSession:
 
     # ---------- Correction 记录（§26/§27 DAgger） ----------
 
+    def _on_audio_chunk(self, chunk_start_us: int, pcm: np.ndarray) -> None:
+        """音频块回调（spec §8.5）：喂推理环形缓冲 + 写入当前 episode 的 wav。"""
+        if self._audio_buffer is not None:
+            self._audio_buffer.push(chunk_start_us, pcm)
+        with self._writer_lock:
+            self._writer.write_audio_chunk(pcm, chunk_start_us)
+
     def _correction_loop(self) -> None:
         """接管期间把玩家操作以 source=correction 写入 Episode Store；其余时间丢弃。"""
         while not self._stop_event.is_set():
@@ -298,6 +320,15 @@ class AutopilotSession:
             threading.Thread(target=self._dispatch_loop, daemon=True, name="dispatch"),
             threading.Thread(target=self._correction_loop, daemon=True, name="correction"),
         ]
+        if self._audio_capture is not None:
+            self._threads.append(
+                threading.Thread(
+                    target=run_capture_loop,
+                    args=(self._audio_capture, self._on_audio_chunk, self._stop_event),
+                    daemon=True,
+                    name="audio-capture",
+                )
+            )
         for thread in self._threads:
             thread.start()
 
@@ -377,6 +408,26 @@ def main(argv: list[str] | None = None) -> int:
     except (RuntimeError, ValueError, FileNotFoundError) as exc:
         raise SystemExit(f"[{_PROG}] 启动失败: {exc}") from exc
 
+    # 音频（spec §8.5）：带音频分支的 checkpoint 必须开启 audio.enabled 并验证设备
+    if getattr(policy, "needs_audio", False) and not settings.audio.enabled:
+        raise SystemExit(
+            f"[{_PROG}] 模型 {policy.model_version} 带音频分支，"
+            "必须在 settings.yaml 开启 audio.enabled（且 audio 参数需与训练时一致）"
+        )
+    audio_capture = None
+    if settings.audio.enabled:
+        from capture.audio import SoundcardLoopbackCapture
+
+        audio_capture = SoundcardLoopbackCapture(settings.audio.sample_rate)
+        try:
+            audio_capture.open()
+            audio_capture.close()
+        except Exception as exc:
+            raise SystemExit(
+                f"[{_PROG}] 音频采集不可用（audio.enabled=true 需要 Windows "
+                f"WASAPI loopback 设备）: {exc}"
+            ) from exc
+
     if args.dry_run:
         from runtime.null_executor import NullExecutor
 
@@ -406,6 +457,7 @@ def main(argv: list[str] | None = None) -> int:
         capture_fps=settings.capture.source_fps,
         input_device=settings.input_device,
         dataset_version=settings.dataset_version,
+        audio_sample_rate=settings.audio.sample_rate if settings.audio.enabled else None,
     )
     inference_logger = InferenceLogger(session_dir / "inference.jsonl")
 
@@ -427,6 +479,7 @@ def main(argv: list[str] | None = None) -> int:
         safety=safety,
         inference_logger=inference_logger,
         scheduler=scheduler,
+        audio_capture=audio_capture,
     )
 
     print(

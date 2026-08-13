@@ -9,7 +9,9 @@
 
 输入契约（spec §8）：
 - frames: Video History 窗口的帧序列（预处理后的 np.ndarray 列表，旧→新）；
-- action_history: 最近的 NormalizedAction 序列（旧→新）。
+- action_history: 最近的 NormalizedAction 序列（旧→新）；
+- audio_pcm: 与 Video History 对齐的过去窗口音频（float32 mono，spec §8.5，可选；
+  带音频分支的 checkpoint 必传，TorchPolicy 内部转 log-mel）。
 
 输出契约（spec §15 Action Chunking）：一次推理返回未来若干步动作。
 """
@@ -44,8 +46,9 @@ class VideoActionPolicy(Protocol):
         self,
         frames: list[np.ndarray],
         action_history: list[NormalizedAction],
+        audio_pcm: np.ndarray | None = None,
     ) -> ActionChunk:
-        """由 Video History + Action History 预测未来 Action Chunk。"""
+        """由 Video History + Action History（+ 可选 Audio History，§8.5）预测未来 Action Chunk。"""
         ...
 
 
@@ -73,6 +76,7 @@ class PlaceholderPolicy:
         self,
         frames: list[np.ndarray],
         action_history: list[NormalizedAction],
+        audio_pcm: np.ndarray | None = None,
     ) -> ActionChunk:
         return ActionChunk(
             actions=tuple(NormalizedAction.neutral() for _ in range(self._future_action_steps)),
@@ -120,6 +124,7 @@ class RandomPolicy:
         self,
         frames: list[np.ndarray],
         action_history: list[NormalizedAction],
+        audio_pcm: np.ndarray | None = None,
     ) -> ActionChunk:
         return ActionChunk(
             actions=tuple(self._random_action() for _ in range(self._future_action_steps)),
@@ -133,21 +138,20 @@ class RandomPolicy:
 def load_policy(checkpoint_path: str | Path | None = None) -> VideoActionPolicy:
     """加载 Policy：无 checkpoint 返回 PlaceholderPolicy。
 
-    有 checkpoint 路径时需要 PyTorch 反序列化真实权重（spec §16-§19 后续实现）；
-    环境无 torch 时抛出带指引的 RuntimeError，而不是静默回退占位模型。
+    有 checkpoint 路径（checkpoints/<version>/ 目录或其中文件）时加载真实
+    TorchPolicy；环境无 torch 时抛出带指引的 RuntimeError，而不是静默回退占位模型。
     """
     if checkpoint_path is None:
         return PlaceholderPolicy()
 
     path = Path(checkpoint_path)
-    if not path.is_file():
-        raise FileNotFoundError(f"checkpoint 文件不存在: {path}")
+    if not path.exists():
+        raise FileNotFoundError(f"checkpoint 不存在: {path}")
     if importlib.util.find_spec("torch") is None:
         raise RuntimeError(
-            f"加载 checkpoint 需要 PyTorch（{path}）。本轮 model 本体为接口骨架，"
-            "未引入 torch；安装 torch 并实现 spec §16-§19 后重试。"
+            f"加载 checkpoint 需要 PyTorch（{path}）：pip install torch torchvision；"
             "无 checkpoint 时 load_policy(None) 返回 PlaceholderPolicy 用于链路验证。"
         )
-    raise RuntimeError(
-        f"checkpoint 加载逻辑尚未实现（{path}）：待 spec §16-§19 模型本体落地后补充。"
-    )
+    from model.torch_policy import load_torch_policy
+
+    return load_torch_policy(path)

@@ -36,3 +36,17 @@ loss_weights:               # Behavior Cloning loss 权重（spec §23：必须�
   camera: 1.0
   button: 1.0
   temporal: 1.0
+
+training:                   # 训练超参（spec §29：写入 checkpoint 元数据保证可复现）
+  epochs: 10
+  batch_size: 32
+  lr: 0.001
+  camera_bins: 21           # Camera Head 离散 bin 数（spec §19.2，奇数含 0 位）
+  train_stage: freeze_backbone  # spec §18 三阶段：freeze_backbone / unfreeze_last / full
+
+audio:                      # 音频模态（spec §8.5，默认关闭；开启后需重新采集数据）
+  enabled: false            # WASAPI loopback 录游戏音频输出（仅 Windows）
+  sample_rate: 16000        # 单声道 16kHz，秒级线索足够
+  mels: 64                  # log-mel 频带数
+  fft_size: 400             # STFT 窗长（25ms @16kHz）
+  hop_size: 160             # STFT hop（10ms @16kHz）

@@ -490,6 +490,26 @@ RECOVER
 
 ---
 
+## 8.5 Optional Audio History
+
+游戏音频（Boss 抬手音效、受击音、环境音）包含画面之外的秒级线索，作为可选模态加入输入：
+
+```text
+Audio History = 与 Video History 对齐的过去窗口音频
+```
+
+约束：
+
+- 采集方式为系统音频输出回录（WASAPI loopback），不依赖麦克风。
+- 单声道、16kHz 采样率足够表达游戏线索音，不追求高保真。
+- 音频与视频使用同一时钟（`now_us()`）打点；音频块到达时刻打点，块起始时间 = 到达时刻 − 块时长。音频是秒级线索，不要求帧↔输入那样的毫秒级同步精度。
+- 模型输入形式为 log-mel 频谱（64 mels，窗长 25ms、hop 10ms）。
+- 默认关闭，由配置显式开启；开启后历史录制数据（无音频）不可用于训练，需重新采集。
+
+第一阶段允许 Audio 不启用。
+
+---
+
 # 9. 动作空间
 
 内部动作表示必须与实际键位解耦。
@@ -1978,6 +1998,7 @@ ai_game_player/
 ├── capture/
 │   ├── screen_capture
 │   ├── input_capture
+│   ├── audio_capture
 │   └── clock
 │
 ├── dataset/

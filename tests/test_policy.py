@@ -73,7 +73,7 @@ def test_load_policy_without_checkpoint_returns_placeholder() -> None:
 
 
 def test_load_policy_missing_file_raises(tmp_path) -> None:
-    with pytest.raises(FileNotFoundError, match="checkpoint 文件不存在"):
+    with pytest.raises(FileNotFoundError, match="checkpoint 不存在"):
         load_policy(tmp_path / "nonexistent.pt")
 
 
