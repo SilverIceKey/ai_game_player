@@ -15,6 +15,7 @@ spec §6 禁令：采集时不允许实时 backward()（与游戏抢 GPU、破�
 from __future__ import annotations
 
 import importlib.util
+import time
 from pathlib import Path
 from typing import Any
 
@@ -116,14 +117,27 @@ class Trainer:
         )
 
         # §24：按钮类别不平衡 pos_weight 先全量统计一次
+        print(f"[train] 统计按钮 pos_weight（spec §24，先全量扫一遍 {len(dataset)} 个样本）…")
+        t_pos = time.time()
         all_buttons = torch.cat([batch["buttons"] for batch in loader], dim=0)
         pos_weight = compute_button_pos_weight(all_buttons).to(self._device)
+        print(f"[train] pos_weight 完成（{time.time() - t_pos:.1f}s）")
+
+        batches_per_epoch = len(loader)
+        print(
+            f"[train] 开始训练: samples={len(dataset)} batch_size={self._training.batch_size} "
+            f"batches/epoch={batches_per_epoch} epochs={self._training.epochs} "
+            f"device={self._device} audio={'on' if self._audio_mels() else 'off'}"
+        )
 
         history: list[dict[str, float]] = []
         net.train()
         for epoch in range(self._training.epochs):
+            epoch_start = time.time()
+            last_log = epoch_start
+            log_every = max(1, batches_per_epoch // 20)  # 每 epoch ≥5% 一行
             epoch_parts: dict[str, list[float]] = {}
-            for batch in loader:
+            for step, batch in enumerate(loader, start=1):
                 batch = {k: v.to(self._device) for k, v in batch.items()}
                 outputs = net(batch["frames"], batch["action_hist"], batch.get("audio_mel"))
                 targets = {
@@ -138,14 +152,30 @@ class Trainer:
                 for name, value in parts.items():
                     epoch_parts.setdefault(name, []).append(value)
                 epoch_parts.setdefault("total", []).append(float(loss.detach()))
+
+                now = time.time()
+                if step % log_every == 0 or now - last_log >= 3.0 or step == batches_per_epoch:
+                    last_log = now
+                    elapsed = now - epoch_start
+                    speed = step * self._training.batch_size / max(elapsed, 1e-9)
+                    eta_s = elapsed / step * (batches_per_epoch - step)
+                    running = {k: float(np.mean(v)) for k, v in epoch_parts.items()}
+                    print(
+                        f"[train] epoch {epoch + 1}/{self._training.epochs} "
+                        f"batch {step}/{batches_per_epoch} ({step * 100 // batches_per_epoch}%) "
+                        + " ".join(f"{k}={v:.4f}" for k, v in running.items())
+                        + f" | {speed:.1f} samples/s eta {eta_s:.0f}s"
+                    )
+            epoch_s = time.time() - epoch_start
             means = {name: float(np.mean(vals)) for name, vals in epoch_parts.items()}
             means["epoch"] = float(epoch + 1)
             history.append(means)
             print(
-                f"[train] epoch {epoch + 1}/{self._training.epochs} "
+                f"[train] epoch {epoch + 1}/{self._training.epochs} done in {epoch_s:.1f}s "
                 + " ".join(f"{k}={v:.4f}" for k, v in means.items() if k != "epoch")
             )
 
+        print("[train] 训练完成，计算训练集指标（spec §36）…")
         eval_result = self._evaluate_train_set(net, loader)
         meta = new_checkpoint_meta(
             model_version=model_version,

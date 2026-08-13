@@ -64,7 +64,7 @@ def test_without_torch_raises(tmp_path, monkeypatch) -> None:
         _trainer()
 
 
-def test_train_candidate_tiny_overfit(tmp_path) -> None:
+def test_train_candidate_tiny_overfit(tmp_path, capsys) -> None:
     """合成数据 2 epoch：loss 下降 + checkpoint 落盘 + meta 五要素齐全。"""
     dataset = _dataset(tmp_path)
     meta = _trainer().train_candidate(
@@ -75,6 +75,11 @@ def test_train_candidate_tiny_overfit(tmp_path) -> None:
         checkpoints_dir=tmp_path / "checkpoints",
     )
     dataset.close()
+
+    out_log = capsys.readouterr().out
+    assert "[train] 开始训练" in out_log
+    assert "batch " in out_log and "samples/s" in out_log  # batch 级进度日志
+    assert "epoch 2/2 done" in out_log
 
     history = meta.eval_result["loss_history"]
     assert history[-1]["total"] < history[0]["total"]  # Phase 1：明显拟合趋势

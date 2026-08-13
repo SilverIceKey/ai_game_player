@@ -16,6 +16,7 @@
 - `config.py` 加 `TrainingConfig`（epochs/batch_size/lr/camera_bins/train_stage）；settings.example.yaml 补 `training:` 段
 - `pyproject.toml` 加 `train` extra（torch/torchvision）；开发机 .venv 装 CPU 版用于单测
 - 测试 +30：encoding/torch_model/losses/train_dataset/trainer/torch_policy/train_cli（合成 session 端到端小训练，CPU）
+- 训练日志加详细进度（2026-08-13 补充）：pos_weight 预扫描提示、batch 级进度行（≥5% 或 3s 心跳，含 running loss / samples/s / ETA）、epoch 耗时行、评估阶段提示——2070s 级别显卡上不再"看着像卡死"
 
 ## 验证结果
 
