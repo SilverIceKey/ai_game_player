@@ -1,0 +1,15 @@
+mss
+numpy
+pydirectinput
+pynput
+pyyaml
+
+[:sys_platform != "win32"]
+opencv-python-headless
+
+[:sys_platform == "win32"]
+opencv-python
+windows-capture<2,>=1.5
+
+[dev]
+pytest

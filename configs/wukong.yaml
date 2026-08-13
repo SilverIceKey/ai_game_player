@@ -8,7 +8,7 @@ window:
   capture_backend: auto        # 截屏后端：auto（WGC 窗口内容截屏优先，失败降级 mss）/ mss / wgc
                                # WGC 支持后台/遮挡；mss 截屏幕区域，要求窗口在前台
   foreground_on_start: true    # AUTOPILOT 正式跑（非 --dry-run）启动时把游戏窗口提前台
-  # rect: [0, 0, 1920, 1080]   # 可选：手动指定截屏区域 [x, y, w, h]，跳过窗口定位（仅 mss）
+  # rect: [0, 0, 2560, 1440]   # 可选：手动指定截屏区域 [x, y, w, h]，跳过窗口定位（仅 mss）
 
 keys:                          # 动作 → 实际键位（spec §9：内部动作与键位解耦；mouse_* 前缀为鼠标键）
   move_forward: "w"

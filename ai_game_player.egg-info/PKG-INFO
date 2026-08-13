@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: ai-game-player
+Version: 0.1.0
+Summary: 面向类魂与第三人称动作游戏的视觉端到端控制系统：从 Video History + Action History 学习 Future Action Chunk 并闭环自主游玩
+Requires-Python: >=3.11
+Requires-Dist: mss
+Requires-Dist: numpy
+Requires-Dist: opencv-python-headless; sys_platform != "win32"
+Requires-Dist: opencv-python; sys_platform == "win32"
+Requires-Dist: pydirectinput
+Requires-Dist: pynput
+Requires-Dist: pyyaml
+Requires-Dist: windows-capture<2,>=1.5; sys_platform == "win32"
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
