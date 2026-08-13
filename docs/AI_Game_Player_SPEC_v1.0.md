@@ -444,9 +444,14 @@ Action[t-m:t-1]
 - 表达镜头运动状态。
 - 减少视觉歧义。
 
+职责边界（v1.0 修订）：Action History 是当前身体 / 控制状态的**辅助上下文**，
+只保留短历史（约 200~500ms，个位数 token），不承担长期探索信息——长期信息
+必须进入 §8.3 的 Memory Tokens，不允许靠保留几十秒 raw Action 解决。
+Action Token 带年龄，年龄作为 attention bias 参与（快衰减 prior，非硬规则）。
+
 ---
 
-## 8.3 Optional Memory
+## 8.3 Memory Tokens（原 Optional Memory，v1.0 修订）
 
 完整游戏流程中，仅靠最近几秒 Video 不足以解决：
 
@@ -456,21 +461,17 @@ Action[t-m:t-1]
 - 当前处于探索还是回退。
 - 某条路是否刚刚失败。
 
-因此后续模型需支持：
+Memory 设计约束：
 
-```text
-Latent Memory / Recurrent State
-```
-
-例如：
-
-\[
-h_t = f(V_t, A_{t-1}, h_{t-1})
-\]
-
-第一阶段允许 Memory 不启用。
-
-Boss 战 MVP 可以只做短时序。
+- Memory 不保存 raw frame / raw action，由历史 Temporal Representation
+  （Visual Token 的逐帧压缩）得到，每帧压缩为 1 个 slot。
+- 配置化：`memory: {enabled, slots, update_interval_ms}`；slot 数有限（如 16），
+  不做无限长度 Memory。
+- Memory Token 带年龄，慢衰减（memory_decay ≪ action decay），但**不允许永久不忘**。
+- Memory 是 Runtime State 不是 Model Weight：checkpoint 只保存 Memory Writer
+  参数，不保存某次游玩的具体 memory 内容；episode 之间必须可清理。
+- Hard Reset 触发（死亡 / 读档 / 主菜单 / 新游戏 / 手动）：清 Memory Tokens +
+  Action History + Pending Action Chunk；过场/传送是否 Reset 不写死，保留显式 API。
 
 ---
 
@@ -755,31 +756,36 @@ t+150ms
 
 ---
 
-# 16. 模型架构
+# 16. 模型架构（v1.0 修订：Token Transformer）
 
-第一阶段推荐：
+Temporal Policy 唯一实现为 Transformer（GRU/LSTM 已移除，旧 checkpoint 标记
+legacy/unsupported，不做 silent fallback）。
 
 ```text
-Video Frames
-    │
-    ▼
-Visual Encoder
-    │
-    ▼
-Visual Tokens
-    │
-    ▼
-Temporal Encoder
-    ▲
-    │
-Action History
-    │
-    ▼
-Policy Decoder
-    │
-    ▼
-Action Chunk
+Recent Video → Visual Encoder → Token Compressor → Visual Tokens（每帧 Kt 个）
+Recent Action History → Action Tokens（短历史，快衰减 age bias）
+Long-term Memory（逐帧压缩 slots，慢衰减 age bias）
+        │
+        ▼  + TypeEmbedding + SpatialEmbedding(visual) + AgeAttentionBias
+Temporal Transformer
+        │
+        ▼  Learned Gate（连续值，无人工语义）
+z = z_current + g_fast·z_fast + g_slow·z_slow
+        │
+        ▼
+Action Decoder → Future Action Chunk [H × D]
 ```
+
+约束：
+
+- Token 统一携带 metadata：token_type / temporal_position / age / source，
+  编码进 embedding 与 attention bias，不传 JSON 之类的外部标记。
+- 每帧视觉压缩为 Kt ∈ {4, 8, 16} 个 token，禁止把大量原始 patch 直接进
+  Temporal Transformer（token 数不爆炸，长期历史走 Memory 而非全连接注意力）。
+- Gate 由模型自己学习当前依赖快上下文还是慢记忆；禁止手写 combat/explore
+  状态机；训练/评估记录 gate mean/std，长期单极化标记 possible_gate_collapse。
+- Action Chunk 输出保持 [B, H, D]（每步 move/camera/buttons 同时）；
+  runtime 采用 Receding Horizon（预测 H 步、只执行 execute_steps 步后重新预测）。
 
 不要求显式：
 
@@ -1189,13 +1195,12 @@ Recovery Data
 
 AUTOPILOT 必须支持即时人工接管。
 
-例如：
+接管触发（两个来源并存）：
 
 ```text
-F12
+override_key（默认 F12）toggle
+或 safety.auto_takeover：检测到任何真实键鼠/手柄输入
 ```
-
-或者手柄组合键。
 
 触发：
 
@@ -1209,14 +1214,49 @@ HUMAN_OVERRIDE
 
 - 清空 Action Queue。
 - 释放所有按键。
-- 停止 AI 输入。
+- 停止 AI 输入下发。
 - 玩家接管。
 
-玩家接管后的操作继续记录为：
+自动恢复：连续 `safety.resume_idle_ms`（默认 2500ms）无人工输入后：
+
+- 清空 pending Action Chunk。
+- 基于当前画面重新推理。
+- 恢复 AI_CONTROL。
+
+### 26.1 持续采集数据闭环（v1.0 修订）
+
+接管**不切换数据文件**：AI 控制与人工接管连续记录在同一条 episode 的完整时间线上。
+
+采集层持续落盘（只记录事实，不判断训练价值）：
+
+- Video：帧流不间断（现有 frames.idx / 视频）。
+- AI Proposed Action：每次推理的完整预测 chunk（未经 execute_steps 截断）
+  + Timestamp/Latency（inference_ms / frame_age_ms / queue_delay_ms）
+  + Memory/Context 诊断（fast_gate / memory_gate / memory_slots_filled），
+  写入 telemetry `type=ai_proposed`；接管期间照常推理并标记 `shadow=true`
+  （Shadow Inference），只是不下发。
+- Actual Executed Action：通过 SafetyFilter 后真正下发的动作（source=ai，现有路径）。
+- 玩家接管后的操作继续记录为 `source=correction`，并推入模型 Action History
+  保持 shadow 推理上下文连续。
+- 时间线 marker（telemetry `type=marker`）：`EPISODE_START` /
+  `HUMAN_OVERRIDE_START` / `AUTOPILOT_RESUME`。
+
+段语义由 Dataset Builder 构建期从 marker 推导，不由采集层写死：
 
 ```text
-source = correction
+AI_CONTROL      正常 AI 控制
+PRE_OVERRIDE    HUMAN_OVERRIDE_START 前 labels.pre_override_window_ms 窗口
+HUMAN_OVERRIDE  [HUMAN_OVERRIDE_START, AUTOPILOT_RESUME] 区间
+POST_OVERRIDE   AUTOPILOT_RESUME 后等长窗口
 ```
+
+样本段标签与 target 规则（sample_builder）：
+
+- `human_demonstration`：无 marker 的 OBSERVE_TRAIN 数据。
+- `human_correction`：anchor 落在接管段，target 必须来自人类操作（DAgger 纠正）。
+- `autopilot_success`：AI 控制且未临近接管，AI 动作可作 imitation target（自模仿）。
+- `autopilot_failure`：PRE_OVERRIDE 段 anchor 整段剔除；任何 pre/override 段内的
+  AI 来源动作不得作为 imitation target 回灌训练。
 
 ---
 

@@ -13,13 +13,21 @@ Inference Worker（chunk 耗尽时 infer_once）──→ ActionScheduler
 Action Dispatcher ── due_action ─→ SafetyFilter ─→ Input Executor
 ```
 
-安全链路：
-- override_key（默认 F12）toggle → HUMAN_OVERRIDE（spec §26）：SafetyFilter 内部
-  立即 Dead Man Switch（release_all + scheduler.clear，spec §40）；接管期间
-  InputCapture 记录玩家操作为 source=correction 写入 Episode Store（§26/§27 DAgger）。
+安全链路与数据闭环（spec §26 修订）：
+- 接管触发两个来源：override_key（默认 F12）toggle；或 safety.auto_takeover 下
+  检测到任何真实键鼠/手柄输入。进入 HUMAN_OVERRIDE 立即 Dead Man Switch
+  （release_all + scheduler.clear，spec §40），AI 停止下发但保持 shadow
+  inference（proposed chunk 照常写入 episode telemetry，shadow=true）。
+- 接管期间玩家操作以 source=correction 写入同一 episode（§26/§27 DAgger），
+  并推入动作历史保持 shadow 上下文连续；时间线写 marker HUMAN_OVERRIDE_START。
+- 连续 safety.resume_idle_ms 无人工输入 → 清空 pending chunk + 自动恢复
+  AI 控制 + marker AUTOPILOT_RESUME，inference 循环基于最新画面重新推理。
+- 完整时间线（Video + proposed + executed + correction + marker + 延迟/gate
+  诊断）全部落在同一条 episode；段语义（AI_CONTROL/PRE_OVERRIDE/
+  HUMAN_OVERRIDE/POST_OVERRIDE）由 dataset/sample_builder.py 构建期推导。
 - 失焦（stop_on_focus_lost）→ 自动 STOP ACTION 并释放输入（spec §39）。
 - 推理超时（safety.inference_timeout_ms，spec §47）→ Pause AI + Release Input，
-  玩家按 override 键接管，恢复 AI 控制时自动解除暂停。
+  玩家接管后再恢复 AI 控制时自动解除暂停。
 
 退出：Ctrl+C → release_all → 停全部 daemon 线程 → close writer → 打印
 ClosedLoopMetrics（spec §37/§43）与延迟分位（spec §32）摘要。
@@ -29,6 +37,7 @@ from __future__ import annotations
 import argparse
 import queue
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -44,7 +53,12 @@ from capture.audio import AudioCapture, run_capture_loop
 from capture.clock import now_us
 from capture.input.base import InputCapture
 from config import GameConfig, Settings
-from dataset.episode_store import EpisodeStoreWriter
+from dataset.episode_store import (
+    MARKER_AUTOPILOT_RESUME,
+    MARKER_EPISODE_START,
+    MARKER_OVERRIDE_START,
+    EpisodeStoreWriter,
+)
 from evaluation.closed_loop import ClosedLoopMetrics
 from model.audio_features import audio_window_us
 from observability.logs import InferenceLogger
@@ -129,6 +143,7 @@ class AutopilotSession:
         self._fatal: Exception | None = None
         self._ai_paused = False  # §47 推理超时 → Pause AI
         self._prev_mode = MODE_AI_CONTROL
+        self._last_human_input_us: int | None = None  # §26 自动恢复静默计时
 
     @property
     def fatal(self) -> Exception | None:
@@ -196,13 +211,24 @@ class AutopilotSession:
     # ---------- Inference Worker → ActionScheduler ----------
 
     def _inference_loop(self) -> None:
-        """chunk 将耗尽时做一次推理并提交（§15/§30）；记录 §33 日志与 §32 延迟。
+        """chunk 将耗尽时做一次推理（§15/§30）；记录 §33 日志与 §32 延迟。
+
+        数据闭环（§26）：每次推理都把完整 proposed chunk + stats + gate/memory
+        诊断写入 episode telemetry；仅 AI_CONTROL 下提交 scheduler，接管期间
+        保持 shadow inference 不下发。
 
         推理超时（safety.inference_timeout_ms，§47）→ Pause AI + Release Input：
-        停止提交新 chunk、触发 Dead Man Switch、写遥测；玩家按 override 键接管
+        仅 AI_CONTROL 下生效（接管时 AI 本就不控制，不报警）；玩家接管
         后恢复 AI 控制时自动解除暂停。
         """
         timeout_ms = self._game_config.safety.inference_timeout_ms
+        # shadow 推理限速 = chunk 执行节奏（接管期间不下发，has_chunk 恒 False，
+        # 没有这行会 busy-loop 占满 GPU）
+        shadow_interval_s = (
+            self._settings.prediction.action_step_ms
+            * self._settings.prediction.execute_steps
+            / 1000.0
+        )
         while not self._stop_event.is_set():
             if self._ai_paused or self.scheduler.has_chunk:
                 self._stop_event.wait(0.01)
@@ -214,7 +240,16 @@ class AutopilotSession:
                 self._stop_event.wait(0.05)
                 continue
             chunk, stats = result
-            self.scheduler.submit_chunk(chunk)
+            shadow = self._safety.mode != MODE_AI_CONTROL
+            with self._writer_lock:
+                self._writer.write_proposed(chunk, stats, shadow=shadow)  # §26 完整预测落盘
+            if not shadow:
+                # spec §15 Receding Horizon：预测 future_action_steps 步，只执行前
+                # execute_steps 步即重新观察预测（policy 输入契约仍输出完整 chunk）
+                execute_steps = self._settings.prediction.execute_steps
+                if len(chunk.actions) > execute_steps:
+                    chunk = replace(chunk, actions=chunk.actions[:execute_steps])
+                self.scheduler.submit_chunk(chunk)
             self.counters.note_inference()
             self.latency.add("inference_ms", stats["inference_ms"])
             self.latency.add("frame_age_ms", stats["frame_age_ms"])
@@ -227,9 +262,10 @@ class AutopilotSession:
                         "action": chunk.actions[0].to_dict(),
                         "action_confidence": chunk.confidence,
                         "mode": self._safety.mode,
+                        "shadow": shadow,
                     }
                 )
-            if stats["inference_ms"] > timeout_ms:
+            if not shadow and stats["inference_ms"] > timeout_ms:
                 self._ai_paused = True
                 self._safety.dead_man_switch()  # §47：Pause AI + Release Input
                 with self._writer_lock:
@@ -245,32 +281,49 @@ class AutopilotSession:
                     f"[{_PROG}] 推理超时 {stats['inference_ms']:.1f}ms > {timeout_ms:g}ms，"
                     "已暂停 AI 并释放输入（spec §47）；按 override 键接管后可恢复"
                 )
+            if shadow:
+                self._stop_event.wait(shadow_interval_s)
 
     # ---------- Action Dispatcher → SafetyFilter → Executor ----------
 
     def _track_mode(self, mode: str, timestamp_us: int) -> None:
-        """跟踪 AI_CONTROL ⇄ HUMAN_OVERRIDE 迁移：闭环指标 + 超时暂停解除。"""
+        """跟踪 AI_CONTROL ⇄ HUMAN_OVERRIDE 迁移：闭环指标 + 时间线 marker + 超时暂停解除。"""
         if mode == self._prev_mode:
             return
         if mode == MODE_HUMAN_OVERRIDE and self.metrics.is_autonomous:
             self.metrics.record_takeover(timestamp_us)  # §37 Manual Takeover
             self._ai_paused = False  # 人工接管后再恢复 AI 控制 = 解除超时暂停
             with self._writer_lock:
-                self._writer.write_telemetry(
-                    {"type": "human_override", "timestamp_us": timestamp_us}
-                )
-            print(f"[{_PROG}] 人工接管（spec §26）：操作将以 source=correction 记录")
+                self._writer.write_marker(MARKER_OVERRIDE_START, timestamp_us)  # §26
+            print(f"[{_PROG}] 人工接管（spec §26）：HUMAN_OVERRIDE_START 已标记，"
+                  "操作以 source=correction 记录，模型保持 shadow inference")
         elif mode == MODE_AI_CONTROL:
             self.metrics.start_autonomous(timestamp_us)
-            print(f"[{_PROG}] 恢复 AI 控制")
+            with self._writer_lock:
+                self._writer.write_marker(MARKER_AUTOPILOT_RESUME, timestamp_us)  # §26
+            print(f"[{_PROG}] 恢复 AI 控制（spec §26）：AUTOPILOT_RESUME 已标记，"
+                  "pending chunk 已清空，基于当前画面重新推理")
         self._prev_mode = mode
 
     def _dispatch_loop(self) -> None:
-        """取到期动作 → 安全过滤 → 执行；无动作时也要轮询环境（否则接管/失焦发现不了）。"""
+        """取到期动作 → 安全过滤 → 执行；无动作时也要轮询环境（否则接管/失焦发现不了）。
+
+        自动恢复（§26）：HUMAN_OVERRIDE 下连续 resume_idle_ms 无人工输入 →
+        清空 pending chunk + request_resume（下一次 check_environment 生效，
+        inference 循环随即基于最新画面重新推理）。
+        """
+        resume_idle_us = int(self._game_config.safety.resume_idle_ms * 1000)
         while not self._stop_event.is_set():
             timestamp_us = now_us()
             state = self._safety.check_environment()
             self._track_mode(state.mode, timestamp_us)
+            if (
+                state.mode == MODE_HUMAN_OVERRIDE
+                and self._last_human_input_us is not None
+                and timestamp_us - self._last_human_input_us > resume_idle_us
+            ):
+                self.scheduler.clear()  # §26：清空 pending action chunk
+                self._safety.request_resume()
             action = self.scheduler.due_action(timestamp_us)
             if action is not None:
                 filtered = self._safety.filter_action(action, timestamp_us)
@@ -282,7 +335,7 @@ class AutopilotSession:
                         self._writer.write_action(record)
             self._stop_event.wait(0.002)
 
-    # ---------- Correction 记录（§26/§27 DAgger） ----------
+    # ---------- 人工输入消费（§26/§27 数据闭环：接管触发 + Correction 记录） ----------
 
     def _on_audio_chunk(self, chunk_start_us: int, pcm: np.ndarray) -> None:
         """音频块回调（spec §8.5）：喂推理环形缓冲 + 写入当前 episode 的 wav。"""
@@ -291,15 +344,27 @@ class AutopilotSession:
         with self._writer_lock:
             self._writer.write_audio_chunk(pcm, chunk_start_us)
 
-    def _correction_loop(self) -> None:
-        """接管期间把玩家操作以 source=correction 写入 Episode Store；其余时间丢弃。"""
+    def _human_input_loop(self) -> None:
+        """全程消费真实输入（spec §26 数据闭环）：
+        - 任何输入刷新静默计时（自动恢复判据）；
+        - AI_CONTROL 下收到输入且 safety.auto_takeover → request_override（下一
+          dispatch 周期内停止下发并释放输入）；
+        - HUMAN_OVERRIDE 下输入以 source=correction 落盘，并推入动作历史
+          （shadow inference 的动作上下文保持连续）。
+        """
+        auto_takeover = self._game_config.safety.auto_takeover
         while not self._stop_event.is_set():
             record = self._input_capture.poll(timeout=0.1)
             if record is None:
                 continue
+            # 用当前时刻而非事件时刻：队列积压的旧事件不应推迟自动恢复计时
+            self._last_human_input_us = now_us()
             if self._safety.mode != MODE_HUMAN_OVERRIDE:
+                if auto_takeover:
+                    self._safety.request_override()
                 continue
             correction = ActionRecord(record.timestamp_us, record.action, SOURCE_CORRECTION)
+            self._action_history.push(correction)  # §8.2：shadow 推理的动作历史
             with self._writer_lock:
                 self._writer.write_action(correction)
 
@@ -310,6 +375,7 @@ class AutopilotSession:
         start_us = now_us()
         with self._writer_lock:
             self._writer.begin_episode(start_us, source=SOURCE_AI)
+            self._writer.write_marker(MARKER_EPISODE_START, start_us)  # §26 时间线起点
         self.counters.mark_started(start_us)
         self.metrics.start_autonomous(start_us)
         self._input_capture.start()
@@ -318,7 +384,7 @@ class AutopilotSession:
             threading.Thread(target=self._preprocess_loop, daemon=True, name="preprocess"),
             threading.Thread(target=self._inference_loop, daemon=True, name="inference"),
             threading.Thread(target=self._dispatch_loop, daemon=True, name="dispatch"),
-            threading.Thread(target=self._correction_loop, daemon=True, name="correction"),
+            threading.Thread(target=self._human_input_loop, daemon=True, name="human-input"),
         ]
         if self._audio_capture is not None:
             self._threads.append(

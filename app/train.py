@@ -107,6 +107,9 @@ def main(argv: list[str] | None = None) -> int:
             input_width=settings.model.input_width,
             input_height=settings.model.input_height,
             audio=settings.audio,
+            memory=settings.memory,
+            action_history=settings.action_history,
+            pre_override_window_ms=settings.labels.pre_override_window_ms,
         )
     except (FileNotFoundError, ValueError) as exc:
         raise SystemExit(f"[{_PROG}] 数据错误: {exc}") from exc
@@ -125,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
         training,
         settings.model,
         settings.prediction,
+        settings.transformer,
+        settings.memory,
         audio=settings.audio,
     )
     try:
@@ -158,6 +163,14 @@ def main(argv: list[str] | None = None) -> int:
         f"[{_PROG}] 判据（spec §42 Phase 1）：loss 显著下降且按钮 P/R 明显高于随机 "
         f"→ pipeline 正常；否则按 spec §17 排查顺序（Timestamp → Labels → Dataset → …）检查"
     )
+    dep = meta.eval_result.get("dependency", {})
+    if dep.get("delta_vs_normal"):
+        print(f"[{_PROG}] 依赖消融（Δ vs normal，越大越依赖该输入，spec §16）：")
+        for name, delta in dep["delta_vs_normal"].items():
+            print(f"  {name}: Δmove={delta['movement_error']:+.4f} "
+                  f"Δcamera={delta['camera_error']:+.4f}")
+        print("  提示：shuffled_video Δ≈0 → 可能没用视觉；zero_action Δ 极大 → "
+              "过度依赖动作历史；zero_memory Δ≈0 → Memory 可能没学到有效信息")
     print(f"[{_PROG}] 下一步：python -m app.autopilot --game {settings.game} "
           f"--checkpoint {checkpoints_dir / model_version} --dry-run")
     return 0

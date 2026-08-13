@@ -83,6 +83,14 @@ class ActionHistoryBuffer:
             records = list(self._records)
         return [r.action for r in records[-n:]]
 
+    def recent_records(self, n: int) -> list[ActionRecord]:
+        """最近 n 条 ActionRecord（带时间戳，spec §16 token 年龄用），按时间升序。"""
+        if n <= 0:
+            return []
+        with self._lock:
+            records = list(self._records)
+        return records[-n:]
+
 
 class AudioRingBuffer:
     """音频环形缓冲（spec §8.5 Audio History）：元素为 (chunk_start_us, pcm_f32 mono)。

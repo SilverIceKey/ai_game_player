@@ -27,7 +27,16 @@ from bisect import bisect_right
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from capture.action import ActionRecord
+from capture.action import SOURCE_AI, ActionRecord
+
+# spec §26 数据闭环：样本段标签（由 telemetry marker 推导，采集层不写）
+SEGMENT_HUMAN_DEMONSTRATION = "human_demonstration"  # OBSERVE_TRAIN 人类示范
+SEGMENT_HUMAN_CORRECTION = "human_correction"  # 接管段内：人类实际动作（DAgger 纠正）
+SEGMENT_AUTOPILOT_SUCCESS = "autopilot_success"  # AI 控制且未临近接管
+SEGMENT_AUTOPILOT_FAILURE = "autopilot_failure"  # 接管前窗口：AI 动作不得回灌为 imitation target
+
+_MARKER_OVERRIDE_START = "HUMAN_OVERRIDE_START"
+_MARKER_AUTOPILOT_RESUME = "AUTOPILOT_RESUME"
 
 
 @dataclass(frozen=True)
@@ -54,6 +63,9 @@ def build_samples(
     frames: Sequence[FrameStamp],
     actions: Sequence[ActionRecord],
     params: SampleParams,
+    markers: Sequence[dict[str, Any]] | None = None,
+    pre_override_window_us: int = 2_000_000,
+    stats: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """构造样本列表。frames/actions 必须按 timestamp_us 升序。
 
@@ -62,6 +74,15 @@ def build_samples(
     - frames: 按时间从旧到新，每项 {ref, target_us, timestamp_us, deviation_us}
     - action_history: 最近 history_actions 条 ≤ anchor 的 ActionRecord（可能更少）
     - target_actions: 每项 {record, label_us, timestamp_us, deviation_us}
+    - segment: 段标签（human_demonstration / human_correction / autopilot_success /
+      autopilot_failure，spec §26 数据闭环）
+
+    markers（telemetry 中 type=="marker" 的事件）存在时启用段推导与 target 过滤：
+    - 接管段 [OVERRIDE_START, RESUME] → human_correction（target 来自人类操作）
+    - START 前 pre_override_window → autopilot_failure，其中 AI 动作不可作 target
+      （导致该 anchor 被跳过，stats["skipped_autopilot_failure"] 计数）
+    - 其余 → autopilot_success，AI 动作可作 target（成功段自模仿）
+    markers 为空/None（OBSERVE_TRAIN）→ 全部 human_demonstration，行为不变。
     """
     if params.sample_fps <= 0:
         raise ValueError(f"sample_fps 必须为正: {params.sample_fps}")
@@ -75,6 +96,8 @@ def build_samples(
     _check_sorted(frame_ts, "frames")
     _check_sorted(action_ts, "actions")
 
+    classifier = _SegmentClassifier(markers, pre_override_window_us)
+
     grid_step_us = round(1_000_000 / params.sample_fps)
     action_step_us = round(params.action_step_ms * 1000)
     offset_us = round(params.action_label_offset_ms * 1000)
@@ -84,12 +107,61 @@ def build_samples(
     while anchor <= frame_ts[-1]:
         sample = _build_one(
             anchor, frames, frame_ts, actions, action_ts,
-            params, grid_step_us, action_step_us, offset_us,
+            params, grid_step_us, action_step_us, offset_us, classifier,
         )
         if sample is not None:
             samples.append(sample)
         anchor += grid_step_us
+    if stats is not None:
+        stats["skipped_autopilot_failure"] = classifier.skipped_failure
     return samples
+
+
+class _SegmentClassifier:
+    """由 marker 事件推导时间线段落（spec §26：采集层不写段标签，构建期推导）。
+
+    classify(t) ∈ {"override", "pre", "post", "ai_control"}；无 markers 时
+    enabled=False，调用方走 human_demonstration 旧路径。
+    """
+
+    def __init__(self, markers: Sequence[dict[str, Any]] | None, window_us: int):
+        self.enabled = bool(markers)
+        self._window_us = int(window_us)
+        self.skipped_failure = 0
+        self._intervals: list[tuple[int, int | None]] = []  # (start, end|None=未闭合)
+        open_start: int | None = None
+        for event in sorted(markers or [], key=lambda e: int(e["timestamp_us"])):
+            marker = event.get("marker")
+            ts = int(event["timestamp_us"])
+            if marker == _MARKER_OVERRIDE_START and open_start is None:
+                open_start = ts
+            elif marker == _MARKER_AUTOPILOT_RESUME and open_start is not None:
+                self._intervals.append((open_start, ts))
+                open_start = None
+        if open_start is not None:  # session 结束于接管中
+            self._intervals.append((open_start, None))
+
+    def classify(self, t_us: int) -> str:
+        for start, end in self._intervals:
+            if start <= t_us and (end is None or t_us <= end):
+                return "override"
+            if start - self._window_us <= t_us < start:
+                return "pre"
+            if end is not None and end < t_us <= end + self._window_us:
+                return "post"
+        return "ai_control"
+
+    def segment_of(self, anchor_us: int) -> str:
+        zone = self.classify(anchor_us)
+        if zone == "override":
+            return SEGMENT_HUMAN_CORRECTION
+        if zone == "pre":
+            return SEGMENT_AUTOPILOT_FAILURE
+        return SEGMENT_AUTOPILOT_SUCCESS  # post 段归入 success（恢复后 AI 正常控制）
+
+    def ai_target_usable(self, t_us: int) -> bool:
+        """AI 来源动作能否作 imitation target：pre/override 段内不可用（spec §26）。"""
+        return self.classify(t_us) in ("ai_control", "post")
 
 
 def _build_one(
@@ -102,6 +174,7 @@ def _build_one(
     grid_step_us: int,
     action_step_us: int,
     offset_us: int,
+    classifier: _SegmentClassifier,
 ) -> dict[str, Any] | None:
     # ---- Observation：窗口内按 sample_fps 间隔回溯，逐槽取 ≤ 目标时刻的最近帧 ----
     obs: list[dict[str, Any]] = []
@@ -130,20 +203,41 @@ def _build_one(
         idx = bisect_right(action_ts, label_us) - 1
         if idx < 0:
             return None  # 标签时刻之前还没有任何动作记录，无法标注，跳过
+        record = actions[idx]
+        # spec §26 数据闭环：AI 来源动作在 pre/override 段内不得作 imitation target
+        # （失败前的 AI 动作不回灌）；该 anchor 整样本跳过并计数
+        if (
+            classifier.enabled
+            and record.source == SOURCE_AI
+            and not classifier.ai_target_usable(label_us)
+        ):
+            classifier.skipped_failure += 1
+            return None
         targets.append(
             {
-                "record": actions[idx],
+                "record": record,
                 "label_us": label_us,
                 "timestamp_us": action_ts[idx],
                 "deviation_us": label_us - action_ts[idx],
             }
         )
 
+    # spec §26 数据闭环：pre（接管前窗口）段 anchor 整段剔除——无论 target 来源，
+    # 失败临近段的观测上下文不作为训练样本；AI 来源动作在 pre/override 段内
+    # 不得作 imitation target（失败前的 AI 动作不回灌），该 anchor 跳过并计数
+    if classifier.enabled and classifier.classify(anchor_us) == "pre":
+        classifier.skipped_failure += 1
+        return None
     return {
         "anchor_us": anchor_us,
         "frames": obs,
         "action_history": history,
         "target_actions": targets,
+        "segment": (
+            classifier.segment_of(anchor_us)
+            if classifier.enabled
+            else SEGMENT_HUMAN_DEMONSTRATION
+        ),
     }
 
 

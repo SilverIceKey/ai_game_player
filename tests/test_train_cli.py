@@ -38,6 +38,9 @@ model:
 prediction:
   action_step_ms: 50
   future_action_steps: 2
+memory:
+  slots: 2
+  update_interval_ms: 500
 training:
   epochs: 1
   batch_size: 8
@@ -55,8 +58,9 @@ def test_main_end_to_end(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         model.torch_model,
         "VideoActionNet",
-        lambda *a, **k: real_net(*a, pretrained=False, hidden_dim=32, **{
-            kk: vv for kk, vv in k.items() if kk not in ("pretrained", "hidden_dim")
+        lambda *a, **k: real_net(*a, pretrained=False, d_model=32, num_layers=1, num_heads=4, **{
+            kk: vv for kk, vv in k.items()
+            if kk not in ("pretrained", "d_model", "num_layers", "num_heads")
         }),
     )
 

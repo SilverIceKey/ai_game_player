@@ -150,3 +150,79 @@ def test_override_blocks_ai_and_records_correction(tmp_path: Path) -> None:
     corrections = [a for a in EpisodeStoreReader(tmp_path / "session").actions()
                    if a.source == SOURCE_CORRECTION]
     assert any(a.action.pressed("attack_light") for a in corrections)
+
+
+def _make_session_fast_resume(tmp_path: Path):
+    """resume_idle_ms=300 的会话：自动恢复可在测试时长内发生。"""
+    from config import SafetyConfig
+
+    game_config = GameConfig(
+        name="test",
+        window=WindowConfig(title="Test Game"),
+        keys={"move_forward": "w", "attack_light": "mouse_left"},
+        safety=SafetyConfig(resume_idle_ms=300.0, max_action_rate_hz=1000.0),
+    )
+    executor = NullExecutor()
+    import runtime.action_scheduler as sched_mod
+
+    scheduler = sched_mod.ActionScheduler(_settings().prediction.action_step_ms)
+    safety = SafetyFilter(
+        game_config.safety,
+        window_title="test",
+        on_release=executor.release_all,
+        on_clear=scheduler.clear,
+        key_poller=lambda key: False,
+        focus_checker=lambda: True,
+    )
+    session = AutopilotSession(
+        _settings(),
+        game_config,
+        source=FakeSource(),
+        executor=executor,
+        policy=PlaceholderPolicy(),
+        input_capture=FakeInputCapture(),
+        writer=EpisodeStoreWriter(
+            tmp_path / "session",
+            mode="AUTOPILOT",
+            game="test",
+            capture_width=64,
+            capture_height=36,
+            capture_fps=30.0,
+            input_device="keyboard_mouse",
+            dataset_version="dataset-v001",
+        ),
+        safety=safety,
+        scheduler=scheduler,
+    )
+    return session, executor
+
+
+def test_auto_takeover_and_auto_resume(tmp_path: Path) -> None:
+    """spec §26 数据闭环：真实输入触发自动接管（停止下发 + shadow inference），
+    静默 300ms 后自动恢复；marker 与 proposed chunk 全部落在同一 episode 时间线。"""
+    session, executor = _make_session_fast_resume(tmp_path)
+    session.start()
+    assert _wait_for(lambda: len(executor.actions) > 0)  # AI 正常下发
+
+    session._input_capture.emit(NormalizedAction(buttons=frozenset({"attack_light"})))
+    assert _wait_for(lambda: session._safety.mode == MODE_HUMAN_OVERRIDE)  # 自动接管
+    blocked_at = len(executor.actions)
+    time.sleep(0.2)
+    assert len(executor.actions) == blocked_at  # 接管期间 AI 未再下发
+
+    assert _wait_for(
+        lambda: session._safety.mode != MODE_HUMAN_OVERRIDE, timeout=3.0
+    )  # 静默 300ms → 自动恢复
+    assert _wait_for(lambda: len(executor.actions) > blocked_at)  # 恢复后重新推理下发
+    session.stop()
+
+    events = EpisodeStoreReader(tmp_path / "session").telemetry()
+    markers = [e["marker"] for e in events if e.get("type") == "marker"]
+    assert markers[0] == "EPISODE_START"
+    assert "HUMAN_OVERRIDE_START" in markers
+    assert "AUTOPILOT_RESUME" in markers
+    proposed = [e for e in events if e.get("type") == "ai_proposed"]
+    assert proposed  # proposed chunk 全程落盘
+    assert any(e["shadow"] for e in proposed)  # 接管期 shadow inference
+    assert any(not e["shadow"] for e in proposed)
+    assert all("stats" in e and "actions" in e for e in proposed)

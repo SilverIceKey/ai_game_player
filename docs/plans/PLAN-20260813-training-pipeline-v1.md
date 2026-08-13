@@ -12,7 +12,7 @@
 2. **模型（spec §16，第一阶段小模型起点）**：
    - Visual Encoder：torchvision 预训练 **ResNet18**（去 fc → 512 维/帧；遵守 §18 禁止随机初始化训视觉，默认 freeze backbone，配置项 `train_stage` 预留三阶段）
    - Action 编码：NormalizedAction → 18 维向量（4 连续轴 + 14 按钮 0/1）
-   - Temporal Encoder：**GRU**（输入 = 帧 embedding 拼接当前 action 向量，history_frames=16 步）——比 Transformer 小且稳，第一阶段够用
+   - Temporal Encoder：**GRU**（输入 = 帧 embedding 拼接当前 action 向量，history_frames=16 步）——比 Transformer 小且稳，第一阶段够用（2026-08-13 补充：应用户要求加了 `training.temporal: gru|transformer` 双实现；基准显示 16 步窗口下两者速度无差异，计算全在 backbone，默认仍 gru）
    - Policy Decoder：MLP → 未来 4 步，每步拆 Head（§19）：
      - Movement Head：2 维 tanh，MSE regression
      - Camera Head：**discretized bins**（每轴 21 bins，cross entropy；§19.2 明确 MSE 会左右互消，优先离散分布）

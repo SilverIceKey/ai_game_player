@@ -89,9 +89,10 @@ class TestInferOnce:
         worker.infer_once(2_000_000)
         got_frames, got_history = policy.calls[0]
         assert len(got_frames) == HISTORY_FRAMES
+        assert all(isinstance(item, tuple) and len(item) == 2 for item in got_frames)  # (frame, ts)
         assert len(got_history) == HISTORY_ACTIONS
-        # 动作历史按时间升序、取最近 3 个
-        assert [a.move_x for a in got_history] == [0.2, 0.3, 0.4]
+        # 动作历史按时间升序、取最近 3 个（ActionRecord 带时间戳，spec §16）
+        assert [a.action.move_x for a in got_history] == [0.2, 0.3, 0.4]
 
 
 class TestRunLoop:

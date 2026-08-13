@@ -6,7 +6,8 @@
 
 - 当前主任务：训练链路落地（spec §42 Phase 1 tiny overfit）——**代码完成，待游戏机真实数据验证**
 - 触发背景：用户已用 `app.observe_train` 实机录制第一段数据；训练在 Windows 游戏机（CUDA）本地跑
-- 当前结论：`python -m app.train` 全链路可用：sessions/ → 样本构造（§12/§22）→ ResNet18(frozen)+GRU+三 Head（§16/§19）→ §23 组合 loss + §24 pos_weight → checkpoints/<version>/ + registry candidate（§7/§29）
+- 当前结论：`python -m app.train` 全链路可用：sessions/ → 样本构造（§12/§22）→ ResNet18(frozen)+三 Head（§16/§19）→ §23 组合 loss + §24 pos_weight → checkpoints/<version>/ + registry candidate（§7/§29）
+  （2026-08-13 后续：时序实现已统一为 Token Transformer，GRU/LSTM 移除，见 `PROGRESS-20260813-token-transformer-v1.md`）
 
 ## 本轮改动
 
@@ -17,6 +18,9 @@
 - `pyproject.toml` 加 `train` extra（torch/torchvision）；开发机 .venv 装 CPU 版用于单测
 - 测试 +30：encoding/torch_model/losses/train_dataset/trainer/torch_policy/train_cli（合成 session 端到端小训练，CPU）
 - 训练日志加详细进度（2026-08-13 补充）：pos_weight 预扫描提示、batch 级进度行（≥5% 或 3s 心跳，含 running loss / samples/s / ETA）、epoch 耗时行、评估阶段提示——2070s 级别显卡上不再"看着像卡死"
+- 帧缓存（2026-08-13 补充）：SessionDataset 构建期把样本引用的帧顺序解码 + resize uint8 缓存（mel 同样缓存），消除 shuffle 后 mp4 随机 seek 解码这一主要瓶颈；预计占用 > 可用内存一半时自动落磁盘 memmap（sessions 根目录 `.frame_cache.npy`，close 清理）
+- 每 epoch 落盘 checkpoint（2026-08-13 补充）：`checkpoints/<version>/{model.pt,meta.json}` 每轮结束更新（中途 meta 标 `partial: true`），Ctrl+C/崩溃不丢进度；评估后的最终版覆盖
+- Temporal Encoder 三实现对比（2026-08-13 补充，**已被 token-transformer 改造取代，配置键 `training.temporal` 已删除**）：`training.temporal: gru|lstm|transformer`。基准（CPU 开发机，batch 8×16 帧 fwd+bwd）：GRU temporal 0.59M 5.24s/batch；LSTM 0.79M 5.02s；Transformer 3.16M 5.07s——**耗时无差异，计算几乎全在 ResNet18 backbone**。历史结论保留供参考：换 Temporal Encoder 不提速，真正的速度杠杆是 input 分辨率 / history_frames / backbone 规格 / batch_size
 
 ## 验证结果
 
@@ -26,7 +30,8 @@
 
 ## 风险与限制
 
-- mp4v 有损帧对训练精度的影响未知；DataLoader 视频懒解码速度未实测（慢则做帧缓存）
+- mp4v 有损帧对训练精度的影响未知
+- ~~DataLoader 视频懒解码速度~~ 已由帧缓存解决（构建期顺序解码常驻内存，2026-08-13）；内存占用 ≈0.25MB/帧需实机确认
 - num_workers=0 单进程加载（Windows 多进程 pickle 视频句柄不稳），吞吐瓶颈待实测
 - Action History 参与方式是 mean-pool 18 维向量（最简方案），表达连段上下文的能力有限，Phase 2 不够再升级
 - 训练与推理的预处理一致性靠共用 model/encoding.py 保证，实机需抽查

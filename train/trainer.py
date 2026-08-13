@@ -24,7 +24,15 @@ import torch
 from torch.utils.data import DataLoader
 
 from capture.action import BUTTONS, NormalizedAction
-from config import AudioConfig, LossWeights, ModelConfig, PredictionConfig, TrainingConfig
+from config import (
+    AudioConfig,
+    LossWeights,
+    MemoryConfig,
+    ModelConfig,
+    PredictionConfig,
+    TrainingConfig,
+    TransformerConfig,
+)
 from model.checkpoint import ModelCheckpointMeta, new_checkpoint_meta
 from model.encoding import bin_probs_to_camera
 from train.losses import compute_button_pos_weight, compute_loss
@@ -53,6 +61,8 @@ class Trainer:
         training: TrainingConfig,
         model_config: ModelConfig,
         prediction: PredictionConfig,
+        transformer: TransformerConfig,
+        memory: MemoryConfig,
         device: torch.device | None = None,
         pretrained: bool = True,
         audio: AudioConfig | None = None,
@@ -63,6 +73,8 @@ class Trainer:
         self._training = training
         self._model_config = model_config
         self._prediction = prediction
+        self._transformer = transformer
+        self._memory = memory
         self._device = device or _default_device()
         self._pretrained = pretrained
         self._audio = audio
@@ -97,14 +109,48 @@ class Trainer:
 
         from model.torch_model import VideoActionNet
 
+        tcfg = self._transformer
         net = VideoActionNet(
             history_frames=self._model_config.history_frames,
+            history_actions=self._model_config.history_actions,
             future_action_steps=self._prediction.future_action_steps,
             camera_bins=self._training.camera_bins,
+            d_model=tcfg.hidden_dim,
+            num_layers=tcfg.num_layers,
+            num_heads=tcfg.num_heads,
+            dropout=tcfg.dropout,
+            visual_tokens_per_frame=tcfg.visual_tokens_per_frame,
+            memory_slots=self._memory.slots if self._memory.enabled else 0,
+            age_decay_action=tcfg.age_decay_action,
+            age_decay_visual=tcfg.age_decay_visual,
+            age_decay_memory=tcfg.age_decay_memory,
+            future_latent_head=tcfg.future_latent_head,
             train_stage=self._training.train_stage,
             pretrained=self._pretrained,
             audio_mels=self._audio_mels(),
         ).to(self._device)
+
+        out_dir = Path(checkpoints_dir) / model_version
+        out_dir.mkdir(parents=True, exist_ok=True)
+        base_meta = new_checkpoint_meta(
+            model_version=model_version,
+            dataset_version=dataset_version,
+            code_commit=code_commit,
+            training_config=self._training_config_snapshot(),
+        )
+
+        def save_checkpoint(eval_result: dict[str, Any]) -> ModelCheckpointMeta:
+            meta = ModelCheckpointMeta(
+                model_version=base_meta.model_version,
+                dataset_version=base_meta.dataset_version,
+                code_commit=base_meta.code_commit,
+                training_config=base_meta.training_config,
+                eval_result=eval_result,
+                created_us=base_meta.created_us,
+            )
+            torch.save(net.state_dict(), out_dir / "model.pt")
+            meta.save(out_dir / "meta.json")
+            return meta
 
         loader = DataLoader(
             dataset,
@@ -137,9 +183,11 @@ class Trainer:
             last_log = epoch_start
             log_every = max(1, batches_per_epoch // 20)  # 每 epoch ≥5% 一行
             epoch_parts: dict[str, list[float]] = {}
+            gate_vals: list[list[float]] = []  # [fast, slow] 逐样本（spec §16 gate 统计）
             for step, batch in enumerate(loader, start=1):
                 batch = {k: v.to(self._device) for k, v in batch.items()}
-                outputs = net(batch["frames"], batch["action_hist"], batch.get("audio_mel"))
+                outputs = _net_forward(net, batch)
+                gate_vals.extend(outputs["gates"].detach().cpu().tolist())
                 targets = {
                     "move": batch["move"],
                     "camera_bins": batch["camera_bins"],
@@ -169,33 +217,45 @@ class Trainer:
             epoch_s = time.time() - epoch_start
             means = {name: float(np.mean(vals)) for name, vals in epoch_parts.items()}
             means["epoch"] = float(epoch + 1)
+            gate_arr = np.asarray(gate_vals)
+            means["gate_fast_mean"] = float(gate_arr[:, 0].mean())
+            means["gate_fast_std"] = float(gate_arr[:, 0].std())
+            means["gate_slow_mean"] = float(gate_arr[:, 1].mean())
+            means["gate_slow_std"] = float(gate_arr[:, 1].std())
             history.append(means)
             print(
                 f"[train] epoch {epoch + 1}/{self._training.epochs} done in {epoch_s:.1f}s "
                 + " ".join(f"{k}={v:.4f}" for k, v in means.items() if k != "epoch")
             )
+            # 每 epoch 落盘一次：中断/Ctrl+C 不丢已训练进度（最终版在评估后覆盖）
+            save_checkpoint({"loss_history": history, "partial": True})
+            print(f"[train] checkpoint 已更新: {out_dir}/")
 
         print("[train] 训练完成，计算训练集指标（spec §36）…")
+        if hasattr(dataset, "augment"):
+            dataset.augment = False  # 评估/消融不带 Action History 增强
         eval_result = self._evaluate_train_set(net, loader)
-        meta = new_checkpoint_meta(
-            model_version=model_version,
-            dataset_version=dataset_version,
-            code_commit=code_commit,
-            training_config=self._training_config_snapshot(),
-        )
-        meta = ModelCheckpointMeta(
-            model_version=meta.model_version,
-            dataset_version=meta.dataset_version,
-            code_commit=meta.code_commit,
-            training_config=meta.training_config,
-            eval_result={**eval_result, "loss_history": history},
-            created_us=meta.created_us,
-        )
+        print("[train] 输入依赖消融测试（spec §16：Visual/Action/Memory Dependency）…")
+        from evaluation.dependency import dependency_report
 
-        out_dir = Path(checkpoints_dir) / model_version
-        out_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(net.state_dict(), out_dir / "model.pt")
-        meta.save(out_dir / "meta.json")
+        eval_result["dependency"] = dependency_report(net, loader, self._device)
+        # spec §16：gate 单极化告警（长期 fast≈1/slow≈0 或反向 = 可能 collapse）
+        last_gates = history[-1]
+        eval_result["gates"] = {
+            "fast_mean": last_gates["gate_fast_mean"],
+            "fast_std": last_gates["gate_fast_std"],
+            "slow_mean": last_gates["gate_slow_mean"],
+            "slow_std": last_gates["gate_slow_std"],
+        }
+        collapse = (
+            last_gates["gate_fast_mean"] > 0.99 and last_gates["gate_slow_mean"] < 0.01
+        ) or (
+            last_gates["gate_slow_mean"] > 0.99 and last_gates["gate_fast_mean"] < 0.01
+        )
+        eval_result["possible_gate_collapse"] = bool(collapse)
+        if collapse:
+            print("[train] 警告: gate 分布单极化，possible_gate_collapse=true（spec §16）")
+        meta = save_checkpoint({**eval_result, "loss_history": history})
         return meta
 
     @torch.no_grad()
@@ -210,7 +270,7 @@ class Trainer:
             if i >= max_batches:
                 break
             batch = {k: v.to(self._device) for k, v in batch.items()}
-            out = net(batch["frames"], batch["action_hist"], batch.get("audio_mel"))
+            out = _net_forward(net, batch)
             move = out["move"][:, 0].cpu().numpy()
             camera = torch.softmax(out["camera_logits"][:, 0], dim=-1).cpu().numpy()
             buttons = torch.sigmoid(out["button_logits"][:, 0]).cpu().numpy()
@@ -247,13 +307,16 @@ class Trainer:
 
     def _training_config_snapshot(self) -> dict[str, Any]:
         """训练配置快照（§29 可复现；含 TorchPolicy 重建结构所需的全部参数）。"""
+        from model.torch_model import ARCH_TAG
+
+        tcfg = self._transformer
         return {
+            "arch": ARCH_TAG,  # 架构标记：loader 据此拒绝 legacy（GRU/LSTM/早期）checkpoint
             "epochs": self._training.epochs,
             "batch_size": self._training.batch_size,
             "lr": self._training.lr,
             "camera_bins": self._training.camera_bins,
             "train_stage": self._training.train_stage,
-            "hidden_dim": 256,  # VideoActionNet 默认；若后续暴露为配置需同步这里
             "history_frames": self._model_config.history_frames,
             "history_actions": self._model_config.history_actions,
             "input_width": self._model_config.input_width,
@@ -261,6 +324,23 @@ class Trainer:
             "sample_fps": self._model_config.sample_fps,
             "action_step_ms": self._prediction.action_step_ms,
             "future_action_steps": self._prediction.future_action_steps,
+            "execute_steps": self._prediction.execute_steps,
+            "transformer": {
+                "hidden_dim": tcfg.hidden_dim,
+                "num_layers": tcfg.num_layers,
+                "num_heads": tcfg.num_heads,
+                "dropout": tcfg.dropout,
+                "visual_tokens_per_frame": tcfg.visual_tokens_per_frame,
+                "future_latent_head": tcfg.future_latent_head,
+                "age_decay_action": tcfg.age_decay_action,
+                "age_decay_visual": tcfg.age_decay_visual,
+                "age_decay_memory": tcfg.age_decay_memory,
+            },
+            "memory": {
+                "enabled": self._memory.enabled,
+                "slots": self._memory.slots,
+                "update_interval_ms": self._memory.update_interval_ms,
+            },
             # spec §8.5：None=无音频分支；加载时按此重建结构与特征参数
             "audio": self._audio_snapshot(),
             "loss_weights": {
@@ -270,3 +350,16 @@ class Trainer:
                 "temporal": self._loss_weights.temporal,
             },
         }
+
+
+def _net_forward(net: Any, batch: dict[str, Any]) -> dict[str, Any]:
+    """统一训练/评估前向调用：batch 缺 memory/audio 键时传 None（对应分支关闭）。"""
+    return net(
+        batch["frames"],
+        batch["frame_ages"],
+        batch["action_hist"],
+        batch["action_ages"],
+        memory_frames=batch.get("memory_frames"),
+        memory_ages=batch.get("memory_ages"),
+        audio_mel=batch.get("audio_mel"),
+    )

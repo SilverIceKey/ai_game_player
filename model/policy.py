@@ -8,8 +8,9 @@
   有 checkpoint 但环境无 torch 时给出明确报错与指引。
 
 输入契约（spec §8）：
-- frames: Video History 窗口的帧序列（预处理后的 np.ndarray 列表，旧→新）；
-- action_history: 最近的 NormalizedAction 序列（旧→新）；
+- frames: Video History 窗口的 (frame, timestamp_us) 列表（预处理后的 np.ndarray
+  配采集时间戳，旧→新；时间戳用于 token 年龄，spec §16 age bias）；
+- action_history: 最近的 ActionRecord 列表（旧→新，时间戳同上）；
 - audio_pcm: 与 Video History 对齐的过去窗口音频（float32 mono，spec §8.5，可选；
   带音频分支的 checkpoint 必传，TorchPolicy 内部转 log-mel）。
 
@@ -22,7 +23,7 @@ import random
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from capture.action import ActionChunk, BUTTONS, NormalizedAction
+from capture.action import ActionChunk, ActionRecord, BUTTONS, NormalizedAction
 from capture.clock import now_us
 
 if TYPE_CHECKING:
@@ -44,8 +45,8 @@ class VideoActionPolicy(Protocol):
 
     def predict(
         self,
-        frames: list[np.ndarray],
-        action_history: list[NormalizedAction],
+        frames: list[tuple[np.ndarray, int]],
+        action_history: list[ActionRecord],
         audio_pcm: np.ndarray | None = None,
     ) -> ActionChunk:
         """由 Video History + Action History（+ 可选 Audio History，§8.5）预测未来 Action Chunk。"""
@@ -74,8 +75,8 @@ class PlaceholderPolicy:
 
     def predict(
         self,
-        frames: list[np.ndarray],
-        action_history: list[NormalizedAction],
+        frames: list[tuple[np.ndarray, int]],
+        action_history: list[ActionRecord],
         audio_pcm: np.ndarray | None = None,
     ) -> ActionChunk:
         return ActionChunk(
@@ -122,8 +123,8 @@ class RandomPolicy:
 
     def predict(
         self,
-        frames: list[np.ndarray],
-        action_history: list[NormalizedAction],
+        frames: list[tuple[np.ndarray, int]],
+        action_history: list[ActionRecord],
         audio_pcm: np.ndarray | None = None,
     ) -> ActionChunk:
         return ActionChunk(

@@ -244,3 +244,19 @@ class TestNonWindowsDefaults:
 
     def test_default_focus_checker_always_focused(self):
         assert _default_focus_checker("any title")() is True
+
+
+def test_request_override_and_resume():
+    """§26 数据闭环：编程模式请求在下一次 check_environment 生效（与 F12 toggle 并存）。"""
+    sf, calls = _filter(key_poller=FakePoller(), focus_checker=lambda: True)
+    assert sf.check_environment().mode == MODE_AI_CONTROL
+
+    sf.request_override()
+    state = sf.check_environment()
+    assert state.mode == MODE_HUMAN_OVERRIDE and state.override_active
+    assert calls["release"] >= 1 and calls["clear"] >= 1  # dead man switch 已触发
+
+    sf.request_override()  # 幂等
+    sf.request_resume()
+    state = sf.check_environment()
+    assert state.mode == MODE_AI_CONTROL and not state.override_active

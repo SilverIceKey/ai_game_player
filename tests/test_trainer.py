@@ -11,15 +11,23 @@ import pytest
 import torch
 
 from config import (
+    ActionHistoryConfig,
     LossWeights,
+    MemoryConfig,
     ModelConfig,
     PredictionConfig,
     Settings,
     TrainingConfig,
+    TransformerConfig,
 )
 from train.dataset import SessionDataset, build_sample_params, find_session_dirs
 from train.trainer import Trainer
 from tests.synth_session import make_synthetic_session
+
+_SMALL_TRANSFORMER = TransformerConfig(
+    hidden_dim=32, num_layers=1, num_heads=4, visual_tokens_per_frame=4
+)
+_SMALL_MEMORY = MemoryConfig(enabled=True, slots=2, update_interval_ms=500)
 
 
 def _settings() -> Settings:
@@ -30,6 +38,8 @@ def _settings() -> Settings:
             input_width=64, input_height=36,
         ),
         prediction=PredictionConfig(action_step_ms=50.0, future_action_steps=2),
+        transformer=_SMALL_TRANSFORMER,
+        memory=_SMALL_MEMORY,
     )
 
 
@@ -40,6 +50,8 @@ def _trainer(training: TrainingConfig | None = None) -> Trainer:
         training=training or TrainingConfig(epochs=2, batch_size=8),
         model_config=settings.model,
         prediction=settings.prediction,
+        transformer=settings.transformer,
+        memory=settings.memory,
         device=torch.device("cpu"),
         pretrained=False,  # 测试不下载 ImageNet 权重
     )
@@ -54,6 +66,8 @@ def _dataset(tmp_path) -> SessionDataset:
         camera_bins=21,
         input_width=64,
         input_height=36,
+        memory=settings.memory,
+        action_history=ActionHistoryConfig(),
     )
 
 
@@ -87,7 +101,10 @@ def test_train_candidate_tiny_overfit(tmp_path, capsys) -> None:
     assert meta.code_commit == "deadbeef"
     assert meta.training_config["history_frames"] == 2
     assert meta.training_config["future_action_steps"] == 2
+    assert meta.training_config["arch"] == "token_transformer_v1"  # spec §16 架构标记
     assert "movement_error" in meta.eval_result
+    assert "gates" in meta.eval_result  # spec §16 gate 统计
+    assert "dependency" in meta.eval_result  # 输入依赖消融
 
     out = tmp_path / "checkpoints" / "model-v001"
     assert (out / "model.pt").is_file()

@@ -83,6 +83,33 @@ def button_precision_recall(
     return out
 
 
+def evaluate_samples_by_scene(
+    predictions: Sequence[NormalizedAction],
+    targets: Sequence[NormalizedAction],
+    scenes: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """按场景分组的离线指标（spec §16 修订：Evaluation 按场景拆分，仅评估用途）。
+
+    scenes 为逐样本场景标签（如 combat / exploration），可选——为 None 时退化
+    为 {"all": 全局指标}。场景标签来自数据标注，不是 Runtime 状态机输入。
+    """
+    if scenes is None:
+        return {"all": evaluate_samples(predictions, targets)}
+    if len(scenes) != len(predictions):
+        raise ValueError(
+            f"场景标签数与样本数不一致: {len(scenes)} vs {len(predictions)}"
+        )
+    groups: dict[str, list[int]] = {}
+    for i, scene in enumerate(scenes):
+        groups.setdefault(scene, []).append(i)
+    return {
+        scene: evaluate_samples(
+            [predictions[i] for i in idxs], [targets[i] for i in idxs]
+        )
+        for scene, idxs in sorted(groups.items())
+    }
+
+
 def evaluate_samples(
     predictions: Sequence[NormalizedAction],
     targets: Sequence[NormalizedAction],

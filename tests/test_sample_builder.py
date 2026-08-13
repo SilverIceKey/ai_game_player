@@ -1,4 +1,4 @@
-"""dataset/sample_builder.py 单元测试：合成时间戳验证时间对齐/偏移/窗口边界。
+"""dataset/sample_builder.py 单元测试：合成时间戳验证时间对齐/偏移/窗口边界/§26 段分类。
 
 全程不触达视频文件（帧引用用字符串代替）。
 """
@@ -6,8 +6,20 @@ from __future__ import annotations
 
 import pytest
 
-from capture.action import ActionRecord, NormalizedAction
-from dataset.sample_builder import FrameStamp, SampleParams, build_samples
+from capture.action import (
+    SOURCE_AI,
+    SOURCE_CORRECTION,
+    ActionRecord,
+    NormalizedAction,
+)
+from dataset.sample_builder import (
+    SEGMENT_AUTOPILOT_SUCCESS,
+    SEGMENT_HUMAN_CORRECTION,
+    SEGMENT_HUMAN_DEMONSTRATION,
+    FrameStamp,
+    SampleParams,
+    build_samples,
+)
 
 T0 = 1_000_000
 GRID_US = 10_000  # sample_fps=100 → 10ms 网格，方便手算
@@ -159,3 +171,77 @@ def test_invalid_params_raise():
         build_samples(_frames(5), _actions(5), _params(sample_fps=0.0))
     with pytest.raises(ValueError, match="正整数"):
         build_samples(_frames(5), _actions(5), _params(history_frames=0))
+
+
+# ---------- §26 数据闭环：段分类与失败段排除 ----------
+
+OVERRIDE_START_US = T0 + 300_000
+RESUME_US = T0 + 400_000
+PRE_WINDOW_US = 50_000
+_MARKERS = [
+    {"type": "marker", "marker": "HUMAN_OVERRIDE_START", "timestamp_us": OVERRIDE_START_US},
+    {"type": "marker", "marker": "AUTOPILOT_RESUME", "timestamp_us": RESUME_US},
+]
+
+
+def _mixed_actions() -> list[ActionRecord]:
+    """AI 动作贯穿全程；接管段 [300ms, 400ms] 内叠 correction 记录。"""
+    records = [
+        ActionRecord(T0 + i * GRID_US, NormalizedAction(move_y=0.5), SOURCE_AI)
+        for i in range(60)
+    ]
+    records += [
+        ActionRecord(OVERRIDE_START_US + i * GRID_US, NormalizedAction(move_y=-1.0), SOURCE_CORRECTION)
+        for i in range(10)
+    ]
+    return sorted(records, key=lambda r: r.timestamp_us)
+
+
+def _build_with_markers(stats: dict | None = None):
+    return build_samples(
+        _frames(60), _mixed_actions(), _params(),
+        markers=_MARKERS, pre_override_window_us=PRE_WINDOW_US, stats=stats,
+    )
+
+
+def test_segments_classified():
+    samples = _build_with_markers()
+    by_anchor = {s["anchor_us"]: s["segment"] for s in samples}
+    # AI 控制段（远离接管窗口）→ autopilot_success
+    assert by_anchor[T0 + 100_000] == SEGMENT_AUTOPILOT_SUCCESS
+    # 接管段内 → human_correction，target 来自人类操作
+    override_samples = [
+        s for s in samples
+        if OVERRIDE_START_US <= s["anchor_us"] <= RESUME_US - 2 * GRID_US
+    ]
+    assert override_samples
+    assert all(s["segment"] == SEGMENT_HUMAN_CORRECTION for s in override_samples)
+    assert all(
+        t["record"].source == SOURCE_CORRECTION
+        for s in override_samples
+        for t in s["target_actions"]
+    )
+
+
+def test_failure_segment_ai_targets_excluded():
+    """接管前窗口（pre 段）的 AI 动作不得回灌为 imitation target：相关 anchor 整样本跳过。"""
+    stats: dict = {}
+    samples = _build_with_markers(stats)
+    assert stats["skipped_autopilot_failure"] > 0
+    # pre 段 [250ms, 300ms) 内没有任何样本（target 必落在 pre/override 的 AI 动作上）
+    assert not any(
+        OVERRIDE_START_US - PRE_WINDOW_US <= s["anchor_us"] < OVERRIDE_START_US
+        for s in samples
+    )
+    # 成功段 AI target 保留（自模仿）
+    success = [s for s in samples if s["segment"] == SEGMENT_AUTOPILOT_SUCCESS]
+    assert any(
+        t["record"].source == SOURCE_AI for s in success for t in s["target_actions"]
+    )
+
+
+def test_no_markers_keeps_legacy_behavior():
+    """无 markers（OBSERVE_TRAIN / 旧数据）：全部 human_demonstration，不过滤。"""
+    samples = build_samples(_frames(20), _mixed_actions()[:30], _params())
+    assert samples
+    assert all(s["segment"] == SEGMENT_HUMAN_DEMONSTRATION for s in samples)

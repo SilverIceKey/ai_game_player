@@ -10,7 +10,10 @@ sessions/<session_id>/
 ├── frames.idx         # JSONL：{"episode", "frame_id", "timestamp_us", "video_offset"}
 ├── actions.bin        # ActionRecord.pack() 定长记录追加（§20.3：高频动作用 binary）
 ├── episodes.json      # episode 元信息：[{episode_id, start_us, end_us, source, video_path, audio_path?, audio_start_us?}]
-└── telemetry.jsonl    # 运行遥测（内容由调用方决定）
+└── telemetry.jsonl    # 运行遥测 + 时间线事件：marker（HUMAN_OVERRIDE_START/AUTOPILOT_RESUME/
+                       # EPISODE_START）与 ai_proposed（每次推理的 proposed chunk + gate/memory
+                       # 诊断 + 延迟，spec §26 数据闭环）；采集层只记录事实，段语义由
+                       # sample_builder 推导
 ```
 
 设计要点：
@@ -30,9 +33,14 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
-from capture.action import SOURCE_HUMAN, ActionRecord
+from capture.action import SOURCE_HUMAN, ActionChunk, ActionRecord
 
 logger = logging.getLogger(__name__)
+
+# 时间线 marker（spec §26 数据闭环）：采集层只写事实事件，段标签由 sample_builder 推导
+MARKER_EPISODE_START = "EPISODE_START"
+MARKER_OVERRIDE_START = "HUMAN_OVERRIDE_START"
+MARKER_AUTOPILOT_RESUME = "AUTOPILOT_RESUME"
 
 # 帧图像加载器签名：(视频文件绝对路径, 帧序号 video_offset) -> BGR ndarray
 FrameLoader = Callable[[Path, int], np.ndarray]
@@ -208,6 +216,38 @@ class EpisodeStoreWriter:
         """追加一条遥测 JSONL（字段内容由调用方决定）。"""
         self._ensure_open()
         self._telemetry_fp.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+    def write_marker(self, marker: str, timestamp_us: int) -> None:
+        """写时间线 marker（spec §26）：HUMAN_OVERRIDE_START / AUTOPILOT_RESUME / EPISODE_START。"""
+        self.write_telemetry(
+            {"type": "marker", "marker": marker, "timestamp_us": int(timestamp_us)}
+        )
+
+    def write_proposed(
+        self,
+        chunk: ActionChunk,
+        stats: dict[str, Any],
+        shadow: bool = False,
+    ) -> None:
+        """写一次推理的 AI Proposed Action（spec §26 数据闭环）。
+
+        chunk 为完整预测（未按 execute_steps 截断）；stats 含 inference_ms /
+        frame_age_ms / queue_delay_ms 及 gate/memory 诊断（InferenceWorker 已合并
+        policy.last_diagnostics），整体内嵌；shadow=True 表示人工接管期间的
+        影子推理（未下发）。
+        """
+        self.write_telemetry(
+            {
+                "type": "ai_proposed",
+                "timestamp_us": int(stats.get("timestamp_us", chunk.created_us)),
+                "created_us": chunk.created_us,
+                "model_version": chunk.model_version,
+                "step_ms": chunk.step_ms,
+                "actions": [a.to_dict() for a in chunk.actions],
+                "stats": dict(stats),
+                "shadow": bool(shadow),
+            }
+        )
 
     def write_audio_chunk(self, pcm_f32: np.ndarray, chunk_start_us: int) -> None:
         """追加一块 mono float32 PCM 到当前 episode 的 wav（§8.5）。

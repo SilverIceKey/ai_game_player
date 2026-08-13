@@ -60,3 +60,47 @@ def test_dataset_shapes_and_content(tmp_path) -> None:
 def test_empty_sessions_rejected(tmp_path) -> None:
     with pytest.raises(ValueError, match="session_dirs 不能为空"):
         SessionDataset([], build_sample_params(_settings()))
+
+
+def test_frame_cache_dedupes_and_reuses(tmp_path) -> None:
+    """帧缓存：相邻样本重叠的帧只解码一次；两次取同一样本结果一致（走缓存）。"""
+    make_synthetic_session(tmp_path / "sessions")
+    settings = _settings()
+    dataset = SessionDataset(
+        find_session_dirs(tmp_path / "sessions"),
+        build_sample_params(settings),
+        camera_bins=21,
+        input_width=64,
+        input_height=36,
+    )
+    # 样本数 × history_frames 远大于去重后的唯一帧数（相邻样本窗口高度重叠）
+    unique = len(dataset._frame_cache)
+    assert unique < len(dataset) * settings.model.history_frames
+    first = dataset[0]["frames"]
+    second = dataset[0]["frames"]
+    assert torch.equal(first, second)
+    # uint8 resize 缓存：值与直接 normalize 原帧等价（0 通道 = frame_id % 256 的 B 通道）
+    assert first.shape == (2, 3, 36, 64)
+    dataset.close()
+
+
+def test_frame_cache_falls_back_to_disk_memmap(tmp_path, monkeypatch) -> None:
+    """可用内存不足阈值时帧缓存落磁盘 memmap，取数正常，close 清理文件。"""
+    import train.dataset as dataset_mod
+
+    monkeypatch.setattr(dataset_mod, "_available_ram_bytes", lambda: 1)  # 1 字节可用 → 强制磁盘
+    make_synthetic_session(tmp_path / "sessions")
+    settings = _settings()
+    dataset = SessionDataset(
+        find_session_dirs(tmp_path / "sessions"),
+        build_sample_params(settings),
+        camera_bins=21,
+        input_width=64,
+        input_height=36,
+    )
+    mmap_path = tmp_path / "sessions" / ".frame_cache.npy"
+    assert dataset._mmap is not None and mmap_path.is_file()
+    item = dataset[0]
+    assert item["frames"].shape == (2, 3, 36, 64)
+    dataset.close()
+    assert not mmap_path.exists()

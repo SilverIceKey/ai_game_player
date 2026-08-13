@@ -199,16 +199,19 @@ def test_model_audio_branch_forward() -> None:
     from model.torch_model import VideoActionNet
 
     net = VideoActionNet(
-        history_frames=2, future_action_steps=2, camera_bins=21,
-        hidden_dim=32, pretrained=False, audio_mels=64,
+        history_frames=2, history_actions=3, future_action_steps=2, camera_bins=21,
+        d_model=32, num_layers=1, num_heads=4, visual_tokens_per_frame=4,
+        pretrained=False, audio_mels=64,
     )
     frames = torch.randn(2, 2, 3, 36, 64)
+    ages = torch.rand(2, 2)
     hist = torch.randn(2, 3, ACTION_DIM)
+    a_ages = torch.rand(2, 3)
     mel = torch.randn(2, 64, 100)
-    out = net(frames, hist, mel)
+    out = net(frames, ages, hist, a_ages, audio_mel=mel)
     assert out["move"].shape == (2, 2, 2)
     with pytest.raises(ValueError, match="audio_mel"):
-        net(frames, hist)  # 带音频分支却不传音频 → 明确报错
+        net(frames, ages, hist, a_ages)  # 带音频分支却不传音频 → 明确报错
 
 
 def test_policy_audio_checkpoint_roundtrip(tmp_path) -> None:
@@ -216,22 +219,29 @@ def test_policy_audio_checkpoint_roundtrip(tmp_path) -> None:
 
     from model.checkpoint import new_checkpoint_meta
     from model.torch_policy import load_torch_policy
-    from model.torch_model import VideoActionNet
+    from model.torch_model import ARCH_TAG, VideoActionNet
 
     net = VideoActionNet(
-        history_frames=2, future_action_steps=2, camera_bins=21,
-        hidden_dim=32, pretrained=False, audio_mels=64,
+        history_frames=2, history_actions=2, future_action_steps=2, camera_bins=21,
+        d_model=32, num_layers=1, num_heads=4, visual_tokens_per_frame=4,
+        pretrained=False, audio_mels=64,
     )
     meta = new_checkpoint_meta(
         model_version="model-v001",
         dataset_version="dataset-v001",
         code_commit="",
         training_config={
+            "arch": ARCH_TAG,
             "history_frames": 2,
+            "history_actions": 2,
             "future_action_steps": 2,
             "camera_bins": 21,
-            "hidden_dim": 32,
             "action_step_ms": 50.0,
+            "transformer": {
+                "hidden_dim": 32, "num_layers": 1, "num_heads": 4,
+                "visual_tokens_per_frame": 4,
+            },
+            "memory": {"enabled": False},
             "audio": {"sample_rate": _SR, "mels": 64, "fft_size": 400, "hop_size": 160},
         },
     )
@@ -242,7 +252,10 @@ def test_policy_audio_checkpoint_roundtrip(tmp_path) -> None:
 
     policy = load_torch_policy(out)
     assert policy.needs_audio
-    frames = [np.random.rand(36, 64, 3).astype(np.float32) for _ in range(2)]
+    frames = [
+        (np.random.rand(36, 64, 3).astype(np.float32), 1_000_000 + i * 16_000)
+        for i in range(2)
+    ]
     pcm = np.random.randn(_SR).astype(np.float32) * 0.1
     chunk = policy.predict(frames, [], pcm)
     assert len(chunk.actions) == 2

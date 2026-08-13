@@ -53,6 +53,9 @@ Phase 1 判据：train loss 显著下降 + 训练集按钮 P/R 明显高于随�
 
 产物：`checkpoints/<model_version>/{model.pt, meta.json}`（含 dataset_version /
 code_commit / training_config，spec §29 可复现）+ `checkpoints/registry.json`（§7 注册表）。
+每个 epoch 结束都会更新一次 checkpoint（中断不丢进度）；用 `app.autopilot
+--checkpoint checkpoints/model-vNNN` 指定版本加载。训练前会把样本引用的帧
+一次解码缓存（内存够驻 RAM，不够自动落磁盘 memmap），不再每 epoch 重复解码视频。
 
 ### 音频模态（spec §8.5，可选，默认关闭）
 

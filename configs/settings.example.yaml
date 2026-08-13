@@ -14,16 +14,18 @@ capture:
 model:
   sample_fps: 12            # 模型时间窗采样率（spec §13：Preprocess Worker 按此节奏抽帧）
   history_frames: 16        # Video History 窗口长度（spec §8.1/§13，≈1330ms @12fps）
-  history_actions: 16       # Action History 窗口长度（spec §8.2）
+  history_actions: 8        # Action Token 数（spec §8.2：短历史 ≈200~500ms 身体/控制状态上下文）
   input_width: 384          # 模型输入分辨率（spec §14 建议起点，不建议直接 1080P）
   input_height: 216
 
 prediction:
   action_step_ms: 50        # 单步动作时长（spec §13/§15 Action Chunking）
   future_action_steps: 4    # 一次推理预测的未来步数（spec §13/§15，horizon ≈ 200ms）
+  execute_steps: 2          # Receding Horizon（spec §16）：预测 4 步只执行 2 步后重新观察预测
 
 labels:
   action_label_offset_ms: 0  # 人类反应延迟补偿（spec §12，实验搜索 0~250）
+  pre_override_window_ms: 2000  # 接管前窗口 = Autopilot Failure 段，AI 动作不回灌（spec §26）
 
 sampling:                   # Replay Buffer 四类采样权重（spec §28，初始值仅为搜索起点）
   historical: 0.50
@@ -43,6 +45,28 @@ training:                   # 训练超参（spec §29：写入 checkpoint 元�
   lr: 0.001
   camera_bins: 21           # Camera Head 离散 bin 数（spec §19.2，奇数含 0 位）
   train_stage: freeze_backbone  # spec §18 三阶段：freeze_backbone / unfreeze_last / full
+
+transformer:                # Token Transformer Temporal Policy（spec §16，唯一时序实现）
+  hidden_dim: 512           # d_model
+  num_layers: 6
+  num_heads: 8
+  dropout: 0.1
+  visual_tokens_per_frame: 8  # 每帧压缩出的 Visual Token 数（4/8/16，A/B 用）
+  future_latent_head: false   # 预留接口（spec §16）：true 即报错，未实现
+  age_decay:                  # Token 年龄 attention bias λ/秒（spec §8.2/§8.3：先验非硬规则）
+    action: 2.0               # Action 快衰减
+    visual: 0.5               # Visual 中速
+    memory: 0.05              # Memory 慢衰减（不许为 0：不允许永久不忘）
+
+memory:                     # Long-term Memory Tokens（spec §8.3）
+  enabled: true
+  slots: 16                 # FIFO 槽位数（不做无限长度）
+  update_interval_ms: 500   # 写入间隔；同时决定训练侧 memory 帧网格（500ms → ≈8s 覆盖）
+
+action_history:             # Action History 训练增强（防 WWWW→W shortcut，spec §8.2）
+  dropout_prob: 0.25        # 随机整步清零
+  mask_prob: 0.20           # 随机 mask
+  random_truncate: true     # 随机砍前缀
 
 audio:                      # 音频模态（spec §8.5，默认关闭；开启后需重新采集数据）
   enabled: false            # WASAPI loopback 录游戏音频输出（仅 Windows）

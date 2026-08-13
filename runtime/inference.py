@@ -4,8 +4,9 @@
 调用注入的 policy 做一次推理，产出 ActionChunk 与统计字段。
 
 policy 为鸭子类型（禁止 import model/ 包，避免依赖方向倒置）：
-    policy.predict(frames: list[np.ndarray], action_history: list[NormalizedAction]) -> ActionChunk
-    （注入 audio_buffer 时追加第三个位置参数 audio_pcm，见下）
+    policy.predict(frames: list[tuple[np.ndarray, int]], action_history: list[ActionRecord]) -> ActionChunk
+    （frames 为 (frame, timestamp_us) 对，action_history 带时间戳——token 年龄用；
+    注入 audio_buffer 时追加第三个位置参数 audio_pcm，见下）
 
 音频（spec §8.5）：注入 audio_buffer 时，infer_once 额外切出与 Video History
 对齐的过去窗口 PCM 传给 policy（mel 特征提取在 policy 内部，与训练共用
@@ -64,15 +65,14 @@ class InferenceWorker:
             return None
 
         t0 = now_us()
-        frames = [frame for frame, _ in window]
         newest_ts = window[-1][1]
-        history = self._action_history.recent(self._history_actions)
+        history = self._action_history.recent_records(self._history_actions)
         t1 = now_us()
         if self._audio_buffer is not None:
             audio_pcm = self._audio_buffer.window(newest_ts - self._audio_window_us, self._audio_window_us)
-            chunk = self._policy.predict(frames, history, audio_pcm)
+            chunk = self._policy.predict(window, history, audio_pcm)
         else:
-            chunk = self._policy.predict(frames, history)
+            chunk = self._policy.predict(window, history)
         t2 = now_us()
 
         stats = {
@@ -82,6 +82,9 @@ class InferenceWorker:
             "queue_delay_ms": (t1 - t0) / 1000.0,
             "inference_ms": (t2 - t1) / 1000.0,
         }
+        diagnostics = getattr(self._policy, "last_diagnostics", None)
+        if diagnostics:  # TorchPolicy：gates / token 计数 / memory 状态（spec §16/§33）
+            stats.update(diagnostics)
         return chunk, stats
 
     def run_loop(
@@ -93,13 +96,14 @@ class InferenceWorker:
     ) -> None:
         """推理后台循环（spec §30：inference 独立线程，禁止与 capture/input 互相阻塞）。
 
-        默认节奏 = chunk 时长（action_step_ms × future_action_steps，spec §15），
-        与 ActionScheduler 派发完一个 chunk 的时间对齐。用 stop_event.wait 睡眠，
-        置位后立即退出。窗口不足时本轮跳过，不视为错误。
+        默认节奏 = chunk 实际执行时长（action_step_ms × execute_steps，spec §15
+        Receding Horizon：预测 future_action_steps 步只执行 execute_steps 步即重新
+        观察预测），与 ActionScheduler 派发完一个 chunk 的时间对齐。
+        用 stop_event.wait 睡眠，置位后立即退出。窗口不足时本轮跳过，不视为错误。
         """
         if interval_s is None:
             interval_s = (
-                self._prediction.action_step_ms * self._prediction.future_action_steps / 1000.0
+                self._prediction.action_step_ms * self._prediction.execute_steps / 1000.0
             )
         while not stop_event.is_set():
             loop_start = now_us()

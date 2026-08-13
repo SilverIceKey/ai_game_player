@@ -2,9 +2,11 @@
 
 由旧 core/safety.py（F12 急停 toggle + 失焦保护）扩展迁移：
 
-- 状态机（§26）：AI_CONTROL ⇄ HUMAN_OVERRIDE，override 键 toggle 边沿检测切换。
-  进入 HUMAN_OVERRIDE 立即触发 Dead Man Switch（清空 Action Queue + 释放全部输入），
-  接管期间 filter_action 阻断全部动作。
+- 状态机（§26）：AI_CONTROL ⇄ HUMAN_OVERRIDE。切换来源两个：override 键 toggle
+  边沿检测；或 `request_override()` / `request_resume()` 编程请求（数据闭环：
+  检测到真实输入自动接管 / 静默超时自动恢复，由 app 层发起，下一次
+  check_environment 生效）。进入 HUMAN_OVERRIDE 立即触发 Dead Man Switch
+  （清空 Action Queue + 释放全部输入），接管期间 filter_action 阻断全部动作。
 - 失焦保护（§39）：游戏窗口必须前台，失焦立即 STOP ACTION 并释放输入。
 - 输出约束（§39，作用于 NormalizedAction）：
   camera 轴单步超 max_camera_delta 截断；单按钮连续按住超 max_button_hold_ms
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 import math
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -133,6 +136,8 @@ class SafetyFilter:
 
         self._mode = MODE_AI_CONTROL
         self._key_was_down = False
+        self._mode_lock = threading.Lock()
+        self._mode_request: str | None = None  # request_override/resume 的待生效请求
         self._hold_start_us: dict[str, int] = {}  # 按钮连续按住的起始时刻
         self._force_released: set[str] = set()  # 已超长按被强制释放、等待模型先松手的按钮
         self._last_pass_us: int | None = None  # 上一个放行动作的时刻（限频用）
@@ -159,8 +164,25 @@ class SafetyFilter:
         if errors:
             raise RuntimeError(f"dead man switch 回调执行失败: {'; '.join(errors)}")
 
+    def request_override(self) -> None:
+        """编程请求进入 HUMAN_OVERRIDE（§26 数据闭环：检测到真实输入自动接管）。
+
+        幂等；在下一次 check_environment 生效（dead man switch 随即清队列+释放输入）。
+        """
+        with self._mode_lock:
+            self._mode_request = MODE_HUMAN_OVERRIDE
+
+    def request_resume(self) -> None:
+        """编程请求恢复 AI_CONTROL（§26：静默超时自动恢复）。幂等，下一次轮询生效。"""
+        with self._mode_lock:
+            self._mode_request = MODE_AI_CONTROL
+
     def check_environment(self) -> SafetyState:
-        """轮询 override 键（toggle 边沿检测）与窗口焦点；不安全时触发 Dead Man Switch。"""
+        """应用编程模式请求 → 轮询 override 键（toggle 边沿检测）与窗口焦点；不安全时触发 Dead Man Switch。"""
+        with self._mode_lock:
+            if self._mode_request is not None:
+                self._mode = self._mode_request
+                self._mode_request = None
         down = bool(self._key_poller(self._safety.override_key))
         if down and not self._key_was_down:
             self._mode = (
