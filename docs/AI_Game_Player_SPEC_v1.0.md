@@ -392,6 +392,19 @@ Episode Boundary
 
 不能在一次战斗 / 控制过程中热切模型。
 
+训练 checkpoint 必须按 model version 聚合、按 epoch 不可覆盖：
+
+```text
+model-vNNN/
+  epochs/epoch-NNN/{model.pt,meta.json}
+  final/{model.pt,meta.json}
+  meta.json
+```
+
+每个完成 epoch 可独立加载；训练结束后才生成 final，并记录 selected_epoch 与
+selection_reason。Model Registry 仍只注册整个 model-vNNN 一次，不把各 epoch 注册成
+独立 candidate。旧平铺 `model-vNNN/{model.pt,meta.json}` 继续兼容加载。
+
 ---
 
 # 8. MVP 输入
@@ -786,6 +799,12 @@ Action Decoder → Future Action Chunk [H × D]
   状态机；训练/评估记录 gate mean/std，长期单极化标记 possible_gate_collapse。
 - Action Chunk 输出保持 [B, H, D]（每步 move/camera/buttons 同时）；
   runtime 采用 Receding Horizon（预测 H 步、只执行 execute_steps 步后重新预测）。
+- Runtime 必须缓存最近 K 帧 Visual Tokens：同一 frame timestamp 只允许经过一次
+  Visual Encoder + Token Compressor；Temporal Transformer 直接消费缓存 token，
+  MemoryWriter 必须复用最新帧相同 token。训练 `forward(frames,...)` 保持原路径，
+  runtime `forward_tokens(...)` 与其在相同 token 输入下数学等价。
+- CUDA runtime 使用 `torch.inference_mode()`；FP16 autocast 必须配置化，只有输出
+  全部 finite 且目标 GPU 上与 FP32 行为对照通过后才允许默认开启。
 
 不要求显式：
 
@@ -1202,6 +1221,11 @@ override_key（默认 F12）toggle
 或 safety.auto_takeover：检测到任何真实键鼠/手柄输入
 ```
 
+Windows 键鼠 capture 必须在低层 hook 入口根据 injected flag 隔离来源；AI 通过
+SendInput/pydirectinput 注入的事件不得进入 human capture callback，也不得刷新人工输入
+静默计时。不得用时间窗或动作值猜测来源。F12 使用独立 SafetyFilter key poller，始终保留。
+`auto_takeover=false` 在实机隔离未验证或异常时继续作为安全回退。
+
 触发：
 
 ```text
@@ -1337,6 +1361,11 @@ Training Config
 Evaluation Result
 ```
 
+每个 epoch metadata 还必须记录：epoch、train loss 各分项、total loss、fast/slow
+gate mean/std、dataset_version、code_commit、training_config、created_us。后续 epoch
+不得修改已完成 epoch 的权重或 metadata。根 metadata/registry metadata 记录
+available_epoch_checkpoints、selected_epoch、selection_reason。
+
 否则不可复现。
 
 ---
@@ -1440,6 +1469,10 @@ Inference FPS
 GPU Utilization
 VRAM
 Temperature
+Visual Encode Latency
+Transformer Latency
+Memory Write Latency
+Decode Latency
 ```
 
 ---
@@ -1456,6 +1489,10 @@ Temperature
   "frame_age_ms": 16,
   "queue_delay_ms": 4,
   "inference_ms": 27.4,
+  "visual_encode_ms": 4.1,
+  "transformer_ms": 18.2,
+  "memory_write_ms": 0.3,
+  "decode_ms": 0.8,
   "action": {},
   "action_confidence": {},
   "mode": "AUTOPILOT"

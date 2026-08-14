@@ -48,7 +48,7 @@ from app.common import (
     new_session_id,
     resolve_settings_path,
 )
-from capture.action import SOURCE_AI, SOURCE_CORRECTION, ActionRecord
+from capture.action import SOURCE_AI, SOURCE_CORRECTION, SOURCE_HUMAN, ActionRecord
 from capture.audio import AudioCapture, run_capture_loop
 from capture.clock import now_us
 from capture.input.base import InputCapture
@@ -257,6 +257,14 @@ class AutopilotSession:
             self.latency.add("inference_ms", stats["inference_ms"])
             self.latency.add("frame_age_ms", stats["frame_age_ms"])
             self.latency.add("queue_delay_ms", stats["queue_delay_ms"])
+            for latency_name in (
+                "visual_encode_ms",
+                "transformer_ms",
+                "memory_write_ms",
+                "decode_ms",
+            ):
+                if latency_name in stats:
+                    self.latency.add(latency_name, stats[latency_name])
             if self._inference_logger is not None:
                 self._inference_logger.write(
                     {
@@ -368,6 +376,8 @@ class AutopilotSession:
         while not self._stop_event.is_set():
             record = self._input_capture.poll(timeout=0.1)
             if record is None:
+                continue
+            if record.source != SOURCE_HUMAN:
                 continue
             # 用当前时刻而非事件时刻：队列积压的旧事件不应推迟自动恢复计时
             self._last_human_input_us = now_us()
@@ -481,7 +491,9 @@ def main(argv: list[str] | None = None) -> int:
     from model.policy import load_policy
 
     try:
-        policy = load_policy(args.checkpoint)
+        policy = load_policy(
+            args.checkpoint, fp16_autocast=settings.prediction.fp16_autocast
+        )
         source = build_frame_source(game_config.window)
         # 探针帧：确定视频尺寸 + 尽早暴露窗口定位/后端失败
         probe, _ = source.grab()

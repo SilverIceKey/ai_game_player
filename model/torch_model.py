@@ -243,9 +243,37 @@ class VideoActionNet(nn.Module):
         """
         B, k = frames.shape[0], frames.shape[1]
         kt = self.visual_tokens_per_frame
-
         v_tokens = self.encode_frames(frames.reshape(B * k, *frames.shape[2:]))
-        v_tokens = v_tokens.reshape(B, k * kt, self.d_model)  # 帧序 × 帧内槽位序
+        return self.forward_tokens(
+            v_tokens.reshape(B, k, kt, self.d_model),
+            frame_ages,
+            action_hist,
+            action_ages,
+            memory_frames=memory_frames,
+            memory_ages=memory_ages,
+            audio_mel=audio_mel,
+            memory_tokens=memory_tokens,
+        )
+
+    def forward_tokens(
+        self,
+        visual_tokens: torch.Tensor,
+        frame_ages: torch.Tensor,
+        action_hist: torch.Tensor,
+        action_ages: torch.Tensor,
+        memory_frames: torch.Tensor | None = None,
+        memory_ages: torch.Tensor | None = None,
+        audio_mel: torch.Tensor | None = None,
+        memory_tokens: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """消费已编码 Visual Tokens；runtime cache 与 `forward` 共用此数学路径。"""
+        B, k, kt, d = visual_tokens.shape
+        if kt != self.visual_tokens_per_frame or d != self.d_model:
+            raise ValueError(
+                f"visual_tokens shape 非法: {tuple(visual_tokens.shape)}，"
+                f"期望 (B,k,{self.visual_tokens_per_frame},{self.d_model})"
+            )
+        v_tokens = visual_tokens.reshape(B, k * kt, d)  # 帧序 × 帧内槽位序
 
         a_tokens = self.action_proj(action_hist)  # (B, m, d)
 
@@ -289,7 +317,7 @@ class VideoActionNet(nn.Module):
             .contiguous()
         )  # (B·heads, L, L)
 
-        out = self.encoder(tokens, mask=mask)  # (B, L, d)
+        out = self._encode_temporal(tokens, mask)  # (B, L, d)
 
         valid = key_ages < PAD_AGE_S  # 空槽不参与池化
         z_cur = _masked_mean(out, valid)
@@ -314,6 +342,34 @@ class VideoActionNet(nn.Module):
             "button_logits": self.button_head(feats).reshape(B, n, NUM_BUTTONS),
             "gates": gates,
         }
+
+    def _encode_temporal(
+        self, tokens: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
+        """与 norm-first TransformerEncoder 相同的非 fused 路径。
+
+        PyTorch CPU eval fastpath 会把当前 per-head float attention mask 算成 NaN；
+        显式走各层公开模块与训练路径数学等价，且不改变任何参数/state_dict key。
+        """
+        out = tokens
+        for layer in self.encoder.layers:
+            if not layer.norm_first:
+                raise RuntimeError("当前架构要求 norm_first=True")
+            normed = layer.norm1(out)
+            attended = layer.self_attn(
+                normed,
+                normed,
+                normed,
+                attn_mask=mask,
+                need_weights=False,
+            )[0]
+            out = out + layer.dropout1(attended)
+            normed = layer.norm2(out)
+            feedforward = layer.linear2(
+                layer.dropout(layer.activation(layer.linear1(normed)))
+            )
+            out = out + layer.dropout2(feedforward)
+        return self.encoder.norm(out) if self.encoder.norm is not None else out
 
 
 def _masked_mean(x: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:

@@ -37,6 +37,7 @@ def test_load_settings_minimal_valid(tmp_path: Path) -> None:
     assert settings.model.input_height == 216
     assert settings.prediction.action_step_ms == 50.0
     assert settings.prediction.future_action_steps == 4
+    assert settings.prediction.fp16_autocast is False
     assert settings.sampling.historical == 0.5
     assert settings.sampling.correction == 0.2
     assert settings.loss_weights.temporal == 1.0
@@ -52,7 +53,7 @@ dataset_version: "dataset-v007"
 input_device: gamepad
 capture: {source_fps: 30}
 model: {sample_fps: 10, history_frames: 8, input_width: 320, input_height: 180}
-prediction: {action_step_ms: 40, future_action_steps: 5}
+prediction: {action_step_ms: 40, future_action_steps: 5, fp16_autocast: true}
 labels: {action_label_offset_ms: 120}
 sampling: {historical: 0.4, recent: 0.3, correction: 0.2, rare: 0.1}
 loss_weights: {move: 1.0, camera: 2.0, button: 1.5, temporal: 0.5}
@@ -64,6 +65,7 @@ loss_weights: {move: 1.0, camera: 2.0, button: 1.5, temporal: 0.5}
     assert settings.capture.source_fps == 30.0
     assert settings.model.history_frames == 8
     assert settings.labels.action_label_offset_ms == 120.0
+    assert settings.prediction.fp16_autocast is True
     assert settings.loss_weights.camera == 2.0
 
 

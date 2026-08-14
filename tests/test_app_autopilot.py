@@ -19,7 +19,7 @@ from config import CaptureConfig, GameConfig, ModelConfig, Settings, WindowConfi
 from dataset.episode_store import EpisodeStoreReader, EpisodeStoreWriter
 from model.policy import PlaceholderPolicy
 from runtime.null_executor import NullExecutor
-from runtime.safety_filter import MODE_HUMAN_OVERRIDE, SafetyFilter
+from runtime.safety_filter import MODE_AI_CONTROL, MODE_HUMAN_OVERRIDE, SafetyFilter
 
 
 class FakeSource:
@@ -37,8 +37,8 @@ class FakeInputCapture(QueuedInputCapture):
     def stop(self) -> None:
         pass
 
-    def emit(self, action: NormalizedAction) -> None:
-        self._emit(ActionRecord(now_us(), action))
+    def emit(self, action: NormalizedAction, source: str = "human") -> None:
+        self._emit(ActionRecord(now_us(), action, source))
 
 
 class FakePoller:
@@ -226,3 +226,15 @@ def test_auto_takeover_and_auto_resume(tmp_path: Path) -> None:
     assert any(e["shadow"] for e in proposed)  # 接管期 shadow inference
     assert any(not e["shadow"] for e in proposed)
     assert all("stats" in e and "actions" in e for e in proposed)
+
+
+def test_non_human_input_does_not_trigger_auto_takeover(tmp_path: Path) -> None:
+    """捕获边界即使误入非 human record，AUTOPILOT 也不得把它当人工接管。"""
+    session, _executor = _make_session_fast_resume(tmp_path)
+    session.start()
+    session._input_capture.emit(
+        NormalizedAction(buttons=frozenset({"attack_light"})), source=SOURCE_AI
+    )
+    time.sleep(0.15)
+    assert session._safety.mode == MODE_AI_CONTROL
+    session.stop()

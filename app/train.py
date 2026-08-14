@@ -140,6 +140,10 @@ def main(argv: list[str] | None = None) -> int:
             code_commit=_code_commit(),
             checkpoints_dir=checkpoints_dir,
         )
+    except FileExistsError as exc:
+        raise SystemExit(
+            f"[{_PROG}] checkpoint 已存在，拒绝覆盖: {checkpoints_dir / model_version}"
+        ) from exc
     finally:
         dataset.close()
 

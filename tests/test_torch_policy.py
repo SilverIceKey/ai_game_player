@@ -1,6 +1,9 @@
 """model/torch_policy.py 单元测试：checkpoint 往返 + VideoActionPolicy 输出契约 + legacy 拒绝。"""
 from __future__ import annotations
 
+from dataclasses import replace
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 
@@ -8,7 +11,7 @@ from capture.action import BUTTONS, ActionChunk, ActionRecord, NormalizedAction,
 from model.policy import PlaceholderPolicy, load_policy
 from model.torch_policy import TorchPolicy
 from model.torch_model import ARCH_TAG, VideoActionNet
-from model.checkpoint import new_checkpoint_meta
+from model.checkpoint import ModelCheckpointMeta, new_checkpoint_meta
 
 _BASE_US = 1_000_000
 
@@ -91,6 +94,33 @@ def test_checkpoint_roundtrip_and_predict(tmp_path) -> None:
     assert 0.0 <= diag["memory_gate"] <= 1.0
     assert diag["visual_tokens"] == 8.0  # 2 帧 × 4 token
     assert diag["memory_updates"] >= 1.0
+    for name in ("visual_encode_ms", "transformer_ms", "memory_write_ms", "decode_ms"):
+        assert np.isfinite(diag[name]) and diag[name] >= 0.0
+
+
+def test_visual_token_cache_does_not_reencode_same_frames(tmp_path) -> None:
+    _make_checkpoint(tmp_path)
+    policy = load_policy(tmp_path / "checkpoints" / "model-v001")
+    frames = _frames()
+    with patch.object(
+        policy._net, "encode_frames", wraps=policy._net.encode_frames
+    ) as encode:
+        policy.predict(frames, _history())
+        policy.predict(frames, _history())
+    assert encode.call_count == 1
+
+
+def test_memory_writer_reuses_cached_latest_visual_tokens(tmp_path) -> None:
+    _make_checkpoint(tmp_path)
+    policy = load_policy(tmp_path / "checkpoints" / "model-v001")
+    with (
+        patch.object(policy._net, "encode_frames", wraps=policy._net.encode_frames) as encode,
+        patch.object(policy._net, "write_memory", wraps=policy._net.write_memory) as writer,
+    ):
+        policy.predict(_frames(), _history())
+    assert encode.call_count == 1  # 整个窗口一次批量 encode，无 Memory 重编
+    assert writer.call_count == 1
+    assert writer.call_args.args[0].shape[0] == 1
 
 
 def test_memory_reset(tmp_path) -> None:
@@ -129,3 +159,26 @@ def test_missing_weights_file(tmp_path) -> None:
     (tmp_path / "checkpoints" / "model-v001" / "model.pt").unlink()
     with pytest.raises(FileNotFoundError, match="model.pt"):
         load_policy(tmp_path / "checkpoints" / "model-v001")
+
+
+def test_interrupted_training_keeps_completed_epoch_loadable(tmp_path) -> None:
+    _make_checkpoint(tmp_path)
+    root = tmp_path / "checkpoints" / "model-v001"
+    epoch = root / "epochs" / "epoch-001"
+    epoch.mkdir(parents=True)
+    (root / "model.pt").replace(epoch / "model.pt")
+    (root / "meta.json").replace(epoch / "meta.json")
+    summary = replace(
+        new_checkpoint_meta(
+            "model-v001",
+            "dataset-v001",
+            "",
+            ModelCheckpointMeta.load(epoch / "meta.json").training_config,
+        ),
+        available_epoch_checkpoints=("epochs/epoch-001",),
+    )
+    summary.save(root / "meta.json")
+
+    assert load_policy(epoch).model_version == "model-v001"
+    with pytest.raises(FileNotFoundError, match="尚未生成 final"):
+        load_policy(root)

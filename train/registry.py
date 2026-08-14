@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -73,14 +74,7 @@ class ModelRegistry:
                 f"模型 {model_version} 状态为 {entry['status']}，不能再记录评估结果"
             )
         meta = entry["meta"]
-        entry["meta"] = ModelCheckpointMeta(
-            model_version=meta.model_version,
-            dataset_version=meta.dataset_version,
-            code_commit=meta.code_commit,
-            training_config=meta.training_config,
-            eval_result=dict(result),
-            created_us=meta.created_us,
-        )
+        entry["meta"] = replace(meta, eval_result=dict(result))
         entry["status"] = STATUS_EVALUATED
         self._save()
 

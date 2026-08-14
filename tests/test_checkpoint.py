@@ -14,6 +14,13 @@ def _meta() -> ModelCheckpointMeta:
         training_config={"lr": 1e-4, "loss_weights": {"move": 1.0}},
         eval_result={"movement_error": 0.12},
         created_us=123456789,
+        epoch=3,
+        train_loss={"move": 0.1},
+        total_loss=0.2,
+        gate={"fast_mean": 0.5},
+        available_epoch_checkpoints=("epochs/epoch-001", "epochs/epoch-002"),
+        selected_epoch=2,
+        selection_reason="last_completed_epoch",
     )
 
 

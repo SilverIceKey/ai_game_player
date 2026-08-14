@@ -51,11 +51,25 @@ python -m app.autopilot --game wukong --checkpoint checkpoints/model-v001 --dry-
 Phase 1 判据：train loss 显著下降 + 训练集按钮 P/R 明显高于随机。
 做不到 → 按 spec §17 排查顺序检查（Timestamp → Labels → Dataset → 动作表示 → …）。
 
-产物：`checkpoints/<model_version>/{model.pt, meta.json}`（含 dataset_version /
-code_commit / training_config，spec §29 可复现）+ `checkpoints/registry.json`（§7 注册表）。
-每个 epoch 结束都会更新一次 checkpoint（中断不丢进度）；用 `app.autopilot
---checkpoint checkpoints/model-vNNN` 指定版本加载。训练前会把样本引用的帧
+产物：`checkpoints/<model_version>/epochs/epoch-NNN/{model.pt,meta.json}`（每轮
+独立保留）+ `final/{model.pt,meta.json}` + 根 `meta.json`（可用 epochs 与最终选择）+
+`checkpoints/registry.json`（整个 model version 只注册一个 candidate）。训练完成后：
+
+```bash
+# 默认加载 final/
+python -m app.autopilot --game wukong --checkpoint checkpoints/model-v001
+# 显式比较某轮
+python -m app.autopilot --game wukong --checkpoint checkpoints/model-v001/epochs/epoch-006
+```
+
+旧平铺格式 `checkpoints/model-v001/{model.pt,meta.json}` 仍可加载。训练中断时，已完成
+epoch 可用显式路径独立加载；尚未生成 final 时根目录不会静默猜选某轮。训练前会把样本引用的帧
 一次解码缓存（内存够驻 RAM，不够自动落磁盘 memmap），不再每 epoch 重复解码视频。
+
+AUTOPILOT runtime 按 frame timestamp 缓存 Visual Tokens：首轮编码完整 history，之后
+每个新视频帧只跑一次 ResNet18 + TokenCompressor，MemoryWriter 复用同一份 token。
+`prediction.fp16_autocast` 可开启 CUDA FP16，但默认关闭，须先在目标 GPU 上完成 finite
+输出与 FP32 行为对照。
 
 ### 音频模态（spec §8.5，可选，默认关闭）
 

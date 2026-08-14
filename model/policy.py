@@ -136,7 +136,9 @@ class RandomPolicy:
         )
 
 
-def load_policy(checkpoint_path: str | Path | None = None) -> VideoActionPolicy:
+def load_policy(
+    checkpoint_path: str | Path | None = None, fp16_autocast: bool = False
+) -> VideoActionPolicy:
     """加载 Policy：无 checkpoint 返回 PlaceholderPolicy。
 
     有 checkpoint 路径（checkpoints/<version>/ 目录或其中文件）时加载真实
@@ -155,4 +157,4 @@ def load_policy(checkpoint_path: str | Path | None = None) -> VideoActionPolicy:
         )
     from model.torch_policy import load_torch_policy
 
-    return load_torch_policy(path)
+    return load_torch_policy(path, fp16_autocast=fp16_autocast)

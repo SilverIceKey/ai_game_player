@@ -23,6 +23,13 @@ class ModelCheckpointMeta:
     training_config: dict[str, Any] = field(default_factory=dict)
     eval_result: dict[str, Any] = field(default_factory=dict)
     created_us: int = 0
+    epoch: int | None = None
+    train_loss: dict[str, float] = field(default_factory=dict)
+    total_loss: float | None = None
+    gate: dict[str, float] = field(default_factory=dict)
+    available_epoch_checkpoints: tuple[str, ...] = ()
+    selected_epoch: int | None = None
+    selection_reason: str = ""
 
     def __post_init__(self) -> None:
         if not self.model_version.strip():
@@ -38,6 +45,13 @@ class ModelCheckpointMeta:
             "training_config": self.training_config,
             "eval_result": self.eval_result,
             "created_us": self.created_us,
+            "epoch": self.epoch,
+            "train_loss": self.train_loss,
+            "total_loss": self.total_loss,
+            "gate": self.gate,
+            "available_epoch_checkpoints": list(self.available_epoch_checkpoints),
+            "selected_epoch": self.selected_epoch,
+            "selection_reason": self.selection_reason,
         }
 
     @classmethod
@@ -52,6 +66,25 @@ class ModelCheckpointMeta:
                 training_config=dict(data.get("training_config") or {}),
                 eval_result=dict(data.get("eval_result") or {}),
                 created_us=int(data.get("created_us", 0)),
+                epoch=(int(data["epoch"]) if data.get("epoch") is not None else None),
+                train_loss={
+                    str(k): float(v) for k, v in dict(data.get("train_loss") or {}).items()
+                },
+                total_loss=(
+                    float(data["total_loss"])
+                    if data.get("total_loss") is not None
+                    else None
+                ),
+                gate={str(k): float(v) for k, v in dict(data.get("gate") or {}).items()},
+                available_epoch_checkpoints=tuple(
+                    str(v) for v in data.get("available_epoch_checkpoints") or ()
+                ),
+                selected_epoch=(
+                    int(data["selected_epoch"])
+                    if data.get("selected_epoch") is not None
+                    else None
+                ),
+                selection_reason=str(data.get("selection_reason", "")),
             )
         except KeyError as exc:
             raise ValueError(f"checkpoint 元数据缺少必填字段: {exc}") from exc

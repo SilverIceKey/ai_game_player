@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import math
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,7 @@ from capture.action import SOURCE_HUMAN
 from capture.input.keyboard_mouse import (
     KeyboardMouseCapture,
     KeyMouseMapper,
+    _physical_win32_event,
     _pynput_key_to_str,
     _pynput_mouse_button_to_str,
     build_reverse_keymap,
@@ -185,6 +187,44 @@ def test_pynput_mouse_button_names():
     assert _pynput_mouse_button_to_str(SimpleNamespace(name="left")) == "mouse_left"
     assert _pynput_mouse_button_to_str(SimpleNamespace(name="right")) == "mouse_right"
     assert _pynput_mouse_button_to_str(SimpleNamespace(name="x1")) is None
+
+
+def test_win32_injected_events_are_filtered_but_physical_events_pass():
+    assert not _physical_win32_event(SimpleNamespace(flags=0x10), 0x10)
+    assert not _physical_win32_event(SimpleNamespace(flags=0x01), 0x01)
+    assert _physical_win32_event(SimpleNamespace(flags=0), 0x10)
+    assert _physical_win32_event(SimpleNamespace(flags=0), 0x01)
+
+
+def test_capture_installs_win32_source_filters(monkeypatch):
+    listeners = []
+
+    class Listener:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            listeners.append(self)
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    pynput = ModuleType("pynput")
+    pynput.keyboard = SimpleNamespace(Listener=Listener)
+    pynput.mouse = SimpleNamespace(Listener=Listener)
+    monkeypatch.setitem(sys.modules, "pynput", pynput)
+    monkeypatch.setattr("capture.input.keyboard_mouse.sys.platform", "win32")
+
+    capture = KeyboardMouseCapture(build_reverse_keymap(KEYS))
+    capture.start()
+    keyboard_filter = listeners[0].kwargs["win32_event_filter"]
+    mouse_filter = listeners[1].kwargs["win32_event_filter"]
+    assert not keyboard_filter(0, SimpleNamespace(flags=0x10))
+    assert keyboard_filter(0, SimpleNamespace(flags=0))
+    assert not mouse_filter(0, SimpleNamespace(flags=0x01))
+    assert mouse_filter(0, SimpleNamespace(flags=0))
+    capture.stop()
 
 
 # ---------- Capture 层：queue 集成与依赖缺失降级 ----------

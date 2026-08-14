@@ -64,6 +64,27 @@ def test_forward_with_memory() -> None:
     _assert_heads(net, net(**_batch(net)))
 
 
+def test_forward_tokens_matches_full_frame_forward() -> None:
+    net = _net(dropout=0.0).eval()
+    batch = _batch(net)
+    frames = batch["frames"]
+    with torch.inference_mode():
+        expected = net(**batch)
+        b, k = frames.shape[:2]
+        tokens = net.encode_frames(frames.reshape(b * k, *frames.shape[2:])).reshape(
+            b, k, net.visual_tokens_per_frame, net.d_model
+        )
+        cached = net.forward_tokens(
+            tokens,
+            batch["frame_ages"],
+            batch["action_hist"],
+            batch["action_ages"],
+        )
+    for name in expected:
+        assert torch.isfinite(expected[name]).all()
+        assert torch.allclose(expected[name], cached[name], atol=1e-6, rtol=1e-5)
+
+
 def test_memory_required_when_enabled() -> None:
     net = _net(memory_slots=2)
     b = _batch(net)

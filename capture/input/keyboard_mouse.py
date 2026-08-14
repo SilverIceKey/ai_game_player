@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import math
+import sys
 import threading
 
 from capture.action import SOURCE_HUMAN, ActionRecord, NormalizedAction
@@ -41,6 +42,13 @@ MOVE_DIRECTIONS: dict[str, tuple[float, float]] = {
 }
 
 _MOUSE_BUTTON_NAMES = ("left", "right", "middle")
+_LLKHF_INJECTED = 0x10
+_LLMHF_INJECTED = 0x01
+
+
+def _physical_win32_event(data: object, injected_flag: int) -> bool:
+    """pynput Win32 hook filter：只把真实硬件事件交给 capture callback。"""
+    return not bool(int(getattr(data, "flags", 0)) & injected_flag)
 
 
 def canonical_key(name: str) -> str:
@@ -240,13 +248,24 @@ class KeyboardMouseCapture(QueuedInputCapture):
             ) from exc
 
         self._stop_event.clear()
+        keyboard_options = {}
+        mouse_options = {}
+        if sys.platform == "win32":
+            keyboard_options["win32_event_filter"] = (
+                lambda _msg, data: _physical_win32_event(data, _LLKHF_INJECTED)
+            )
+            mouse_options["win32_event_filter"] = (
+                lambda _msg, data: _physical_win32_event(data, _LLMHF_INJECTED)
+            )
         self._kb_listener = keyboard.Listener(
             on_press=lambda key: self._on_key_event(key, True),
             on_release=lambda key: self._on_key_event(key, False),
+            **keyboard_options,
         )
         self._mouse_listener = mouse.Listener(
             on_move=self._on_move,
             on_click=self._on_click,
+            **mouse_options,
         )
         self._coalesce_thread = threading.Thread(
             target=self._coalesce_loop, daemon=True, name="km-coalesce"

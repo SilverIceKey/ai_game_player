@@ -73,13 +73,17 @@ def test_main_end_to_end(tmp_path, monkeypatch) -> None:
     assert rc == 0
 
     ckpt = tmp_path / "checkpoints" / "model-v001"
-    assert (ckpt / "model.pt").is_file()
     assert (ckpt / "meta.json").is_file()
+    assert (ckpt / "epochs" / "epoch-001" / "model.pt").is_file()
+    assert (ckpt / "final" / "model.pt").is_file()
 
     from train.registry import ModelRegistry
 
     registry = ModelRegistry.load(tmp_path / "checkpoints" / "registry.json")
     assert registry.status("model-v001") == "candidate"
+    registered = registry._models["model-v001"]["meta"]
+    assert registered.available_epoch_checkpoints == ("epochs/epoch-001",)
+    assert registered.selected_epoch == 1
 
 
 def test_main_no_sessions_clear_error(tmp_path) -> None:

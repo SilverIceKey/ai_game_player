@@ -5,9 +5,8 @@ spec §6 禁令：采集时不允许实时 backward()（与游戏抢 GPU、破�
 绝不嵌入采集/推理主链路。
 
 产物（spec §29 可复现性）：
-- checkpoints/<model_version>/model.pt（state_dict）
-- checkpoints/<model_version>/meta.json（ModelCheckpointMeta：dataset_version /
-  code_commit / training_config / eval_result）
+- checkpoints/<model_version>/epochs/epoch-NNN/{model.pt,meta.json}（逐轮不可覆盖）
+- checkpoints/<model_version>/final/{model.pt,meta.json} + 根 meta.json（最终选择与汇总）
 - 训练集上的 §36 指标写入 eval_result，作为 Phase 1（§42 tiny overfit）判据
 
 本模块顶层 import torch：只在训练路径上延迟导入（app.train）。
@@ -15,6 +14,8 @@ spec §6 禁令：采集时不允许实时 backward()（与游戏抢 GPU、破�
 from __future__ import annotations
 
 import importlib.util
+import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from capture.action import BUTTONS, NormalizedAction
+from capture.clock import now_us
 from config import (
     AudioConfig,
     LossWeights,
@@ -33,7 +35,7 @@ from config import (
     TrainingConfig,
     TransformerConfig,
 )
-from model.checkpoint import ModelCheckpointMeta, new_checkpoint_meta
+from model.checkpoint import ModelCheckpointMeta
 from model.encoding import bin_probs_to_camera
 from train.losses import compute_button_pos_weight, compute_loss
 
@@ -131,25 +133,53 @@ class Trainer:
         ).to(self._device)
 
         out_dir = Path(checkpoints_dir) / model_version
-        out_dir.mkdir(parents=True, exist_ok=True)
-        base_meta = new_checkpoint_meta(
-            model_version=model_version,
-            dataset_version=dataset_version,
-            code_commit=code_commit,
-            training_config=self._training_config_snapshot(),
-        )
+        out_dir.mkdir(parents=True, exist_ok=False)
+        training_config = self._training_config_snapshot()
+        epoch_paths: list[str] = []
 
-        def save_checkpoint(eval_result: dict[str, Any]) -> ModelCheckpointMeta:
+        def atomic_state_dict(path: Path) -> None:
+            tmp = path.with_name(path.name + ".tmp")
+            try:
+                torch.save(net.state_dict(), tmp)
+                os.replace(tmp, path)
+            finally:
+                tmp.unlink(missing_ok=True)
+
+        def atomic_meta(meta: ModelCheckpointMeta, path: Path) -> None:
+            tmp = path.with_name(path.name + ".tmp")
+            try:
+                meta.save(tmp)
+                os.replace(tmp, path)
+            finally:
+                tmp.unlink(missing_ok=True)
+
+        def save_epoch(epoch: int, means: dict[str, float]) -> ModelCheckpointMeta:
+            relative = f"epochs/epoch-{epoch:03d}"
+            epoch_dir = out_dir / relative
+            epoch_dir.mkdir(parents=True, exist_ok=False)
             meta = ModelCheckpointMeta(
-                model_version=base_meta.model_version,
-                dataset_version=base_meta.dataset_version,
-                code_commit=base_meta.code_commit,
-                training_config=base_meta.training_config,
-                eval_result=eval_result,
-                created_us=base_meta.created_us,
+                model_version=model_version,
+                dataset_version=dataset_version,
+                code_commit=code_commit,
+                training_config=training_config,
+                eval_result={"partial": True},
+                created_us=now_us(),
+                epoch=epoch,
+                train_loss={
+                    name: means[name]
+                    for name in ("move", "camera", "button", "temporal")
+                },
+                total_loss=means["total"],
+                gate={
+                    "fast_mean": means["gate_fast_mean"],
+                    "fast_std": means["gate_fast_std"],
+                    "slow_mean": means["gate_slow_mean"],
+                    "slow_std": means["gate_slow_std"],
+                },
             )
-            torch.save(net.state_dict(), out_dir / "model.pt")
-            meta.save(out_dir / "meta.json")
+            atomic_state_dict(epoch_dir / "model.pt")
+            atomic_meta(meta, epoch_dir / "meta.json")
+            epoch_paths.append(relative)
             return meta
 
         loader = DataLoader(
@@ -227,9 +257,8 @@ class Trainer:
                 f"[train] epoch {epoch + 1}/{self._training.epochs} done in {epoch_s:.1f}s "
                 + " ".join(f"{k}={v:.4f}" for k, v in means.items() if k != "epoch")
             )
-            # 每 epoch 落盘一次：中断/Ctrl+C 不丢已训练进度（最终版在评估后覆盖）
-            save_checkpoint({"loss_history": history, "partial": True})
-            print(f"[train] checkpoint 已更新: {out_dir}/")
+            save_epoch(epoch + 1, means)
+            print(f"[train] checkpoint 已保存: {out_dir / epoch_paths[-1]}/")
 
         print("[train] 训练完成，计算训练集指标（spec §36）…")
         if hasattr(dataset, "augment"):
@@ -255,8 +284,32 @@ class Trainer:
         eval_result["possible_gate_collapse"] = bool(collapse)
         if collapse:
             print("[train] 警告: gate 分布单极化，possible_gate_collapse=true（spec §16）")
-        meta = save_checkpoint({**eval_result, "loss_history": history})
-        return meta
+        selected_epoch = self._training.epochs
+        selection_reason = "last_completed_epoch"
+        final_dir = out_dir / "final"
+        final_dir.mkdir(exist_ok=False)
+        final_weights = final_dir / "model.pt"
+        final_tmp = final_weights.with_name(final_weights.name + ".tmp")
+        try:
+            shutil.copy2(out_dir / epoch_paths[-1] / "model.pt", final_tmp)
+            os.replace(final_tmp, final_weights)
+        finally:
+            final_tmp.unlink(missing_ok=True)
+
+        final_meta = ModelCheckpointMeta(
+            model_version=model_version,
+            dataset_version=dataset_version,
+            code_commit=code_commit,
+            training_config=training_config,
+            eval_result={**eval_result, "loss_history": history},
+            created_us=now_us(),
+            available_epoch_checkpoints=tuple(epoch_paths),
+            selected_epoch=selected_epoch,
+            selection_reason=selection_reason,
+        )
+        atomic_meta(final_meta, final_dir / "meta.json")
+        atomic_meta(final_meta, out_dir / "meta.json")
+        return final_meta
 
     @torch.no_grad()
     def _evaluate_train_set(self, net: Any, loader: DataLoader, max_batches: int = 16) -> dict[str, Any]:

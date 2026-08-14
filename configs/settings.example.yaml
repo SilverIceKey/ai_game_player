@@ -22,6 +22,7 @@ prediction:
   action_step_ms: 50        # 单步动作时长（spec §13/§15 Action Chunking）
   future_action_steps: 4    # 一次推理预测的未来步数（spec §13/§15，horizon ≈ 200ms）
   execute_steps: 2          # Receding Horizon（spec §16）：预测 4 步只执行 2 步后重新观察预测
+  fp16_autocast: false      # CUDA FP16；仅实机 finite + FP32 行为对照通过后开启
 
 labels:
   action_label_offset_ms: 0  # 人类反应延迟补偿（spec §12，实验搜索 0~250）

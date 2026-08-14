@@ -9,15 +9,18 @@
 归一化与训练侧共用 model/encoding.py，保证 train/inference 一致。
 
 Runtime Memory（spec §8.3）：memory 是推理侧运行状态，不进 checkpoint。
-每次 predict 若距上次写入 ≥ update_interval_ms，用最新帧跑共享压缩路径
-（encode_frames + write_memory）压 1 个 slot 推入 deque；forward 走
-memory_tokens 预压缩路径，避免每次推理重复编码 S 帧。
+Visual Token cache 按 frame timestamp 仅编码新帧；每次 predict 直接把最近 K 帧
+缓存 token 交给 forward_tokens。MemoryWriter 复用最新帧缓存 token 压 1 个 slot，
+不重复调用 backbone/compressor。
 reset_memory() 是 Hard Reset 入口（死亡/读档/新游戏等由 app 层判定触发）。
 """
 from __future__ import annotations
 
 from collections import deque
+from contextlib import nullcontext
 from pathlib import Path
+from time import perf_counter
+from typing import Any
 
 import numpy as np
 import torch
@@ -37,11 +40,16 @@ class TorchPolicy:
         net: VideoActionNet,
         meta: ModelCheckpointMeta,
         device: torch.device | None = None,
+        fp16_autocast: bool = False,
     ):
         self._net = net
         self._meta = meta
         self._device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._net.to(self._device).eval()
+        self._fp16_autocast = bool(fp16_autocast and self._device.type == "cuda")
+        self._visual_tokens: deque[tuple[int, torch.Tensor]] = deque(
+            maxlen=net.history_frames
+        )
         mem_cfg = meta.training_config.get("memory") or {}
         self._mem_interval_us = int(mem_cfg.get("update_interval_ms", 500)) * 1000
         self._mem_slots: deque[tuple[torch.Tensor, int]] = deque(
@@ -67,7 +75,7 @@ class TorchPolicy:
         self._mem_last_write_us = None
         self._mem_resets += 1
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def predict(
         self,
         frames: list[tuple[np.ndarray, int]],
@@ -82,9 +90,6 @@ class TorchPolicy:
         window = frames[-k:]
         anchor_us = int(window[-1][1])  # 最新帧时刻 = 推理 anchor
 
-        frame_tensor = torch.from_numpy(
-            np.stack([normalize_frame(f) for f, _ in window])
-        ).unsqueeze(0).to(self._device)
         frame_ages = torch.tensor(
             [[(anchor_us - int(ts)) / 1e6 for _, ts in window]],
             dtype=torch.float32,
@@ -103,12 +108,6 @@ class TorchPolicy:
         hist_tensor = torch.from_numpy(hist).unsqueeze(0).to(self._device)
         age_tensor = torch.from_numpy(ages).unsqueeze(0).to(self._device)
 
-        memory_tokens = None
-        memory_ages = None
-        if net.memory_slots > 0:
-            self._maybe_write_memory(frame_tensor, anchor_us)
-            memory_tokens, memory_ages = self._memory_tensors(anchor_us)
-
         audio_tensor = None
         if net.audio_mels is not None:
             if audio_pcm is None:
@@ -125,27 +124,50 @@ class TorchPolicy:
             )
             audio_tensor = torch.from_numpy(mel).unsqueeze(0).to(self._device)
 
-        out = net(
-            frame_tensor,
-            frame_ages,
-            hist_tensor,
-            age_tensor,
-            memory_ages=memory_ages,
-            audio_mel=audio_tensor,
-            memory_tokens=memory_tokens,
+        autocast = (
+            torch.autocast(device_type="cuda", dtype=torch.float16)
+            if self._fp16_autocast
+            else nullcontext()
         )
-        gates = out["gates"][0].cpu()
-        self.last_diagnostics = {
-            "fast_gate": float(gates[0]),
-            "memory_gate": float(gates[1]),
-            "visual_tokens": float(k * net.visual_tokens_per_frame),
-            "action_tokens": float(m),
-            "memory_tokens": float(net.memory_slots),
-            "memory_slots_filled": float(len(self._mem_slots)),
-            "memory_updates": float(self._mem_updates),
-            "memory_resets": float(self._mem_resets),
-        }
+        with autocast:
+            visual_start = self._timer_start()
+            visual_tokens = self._visual_window(window)
+            visual_mark = self._timer_end(visual_start)
 
+            memory_tokens = None
+            memory_ages = None
+            memory_mark: Any = 0.0
+            memory_written = False
+            if net.memory_slots > 0:
+                memory_start = self._timer_start()
+                memory_written = self._maybe_write_memory(
+                    visual_tokens[:, -1], anchor_us
+                )
+                memory_mark = self._timer_end(memory_start)
+                memory_tokens, memory_ages = self._memory_tensors(anchor_us)
+
+            transformer_start = self._timer_start()
+            out = net.forward_tokens(
+                visual_tokens,
+                frame_ages,
+                hist_tensor,
+                age_tensor,
+                memory_ages=memory_ages,
+                audio_mel=audio_tensor,
+                memory_tokens=memory_tokens,
+            )
+            transformer_mark = self._timer_end(transformer_start)
+
+        if self._device.type == "cuda":
+            torch.cuda.synchronize(self._device)
+        visual_encode_ms = self._timer_ms(visual_mark)
+        transformer_ms = self._timer_ms(transformer_mark)
+        memory_write_ms = self._timer_ms(memory_mark) if memory_written else 0.0
+        if not all(bool(torch.isfinite(value).all()) for value in out.values()):
+            raise RuntimeError("模型推理输出含 NaN/Inf，拒绝下发动作")
+
+        decode_start = perf_counter()
+        gates = out["gates"][0].cpu()
         move = out["move"][0].cpu().numpy()  # (n, 2)
         camera = torch.softmax(out["camera_logits"][0], dim=-1).cpu().numpy()  # (n, 2, bins)
         button_probs = torch.sigmoid(out["button_logits"][0]).cpu().numpy()  # (n, 14)
@@ -165,7 +187,7 @@ class TorchPolicy:
                 )
             )
 
-        return ActionChunk(
+        chunk = ActionChunk(
             actions=tuple(actions),
             step_ms=float(self._meta.training_config.get("action_step_ms", 50.0)),
             model_version=self.model_version,
@@ -174,18 +196,77 @@ class TorchPolicy:
             },
             created_us=now_us(),
         )
+        decode_ms = (perf_counter() - decode_start) * 1000.0
+        self.last_diagnostics = {
+            "fast_gate": float(gates[0]),
+            "memory_gate": float(gates[1]),
+            "visual_tokens": float(k * net.visual_tokens_per_frame),
+            "action_tokens": float(m),
+            "memory_tokens": float(net.memory_slots),
+            "memory_slots_filled": float(len(self._mem_slots)),
+            "memory_updates": float(self._mem_updates),
+            "memory_resets": float(self._mem_resets),
+            "visual_encode_ms": visual_encode_ms,
+            "transformer_ms": transformer_ms,
+            "memory_write_ms": memory_write_ms,
+            "decode_ms": decode_ms,
+            "fp16_autocast": float(self._fp16_autocast),
+        }
+        return chunk
 
-    def _maybe_write_memory(self, frame_tensor: torch.Tensor, anchor_us: int) -> None:
-        """距上次写入 ≥ update_interval 时，用最新帧压缩 1 个 Memory Slot（spec §8.3）。"""
+    def _visual_window(
+        self, window: list[tuple[np.ndarray, int]]
+    ) -> torch.Tensor:
+        """只编码未缓存帧，返回 (1,k,Kt,d) Visual Tokens。"""
+        timestamps = [int(ts) for _, ts in window]
+        if len(set(timestamps)) != len(timestamps):
+            raise ValueError("Video History 含重复 timestamp，无法可靠识别 Visual Token cache")
+        cached = dict(self._visual_tokens)
+        missing = [(frame, ts) for frame, ts in window if int(ts) not in cached]
+        if missing:
+            tensor = torch.from_numpy(
+                np.stack([normalize_frame(frame) for frame, _ in missing])
+            ).to(self._device)
+            encoded = self._net.encode_frames(tensor)
+            for (_, ts), tokens in zip(missing, encoded, strict=True):
+                self._visual_tokens.append((int(ts), tokens))
+            cached = dict(self._visual_tokens)
+        return torch.stack([cached[ts] for ts in timestamps]).unsqueeze(0)
+
+    def _maybe_write_memory(self, latest_tokens: torch.Tensor, anchor_us: int) -> bool:
+        """距上次写入 ≥ interval 时，复用最新帧 Visual Tokens 写 1 个 slot。"""
         if (
             self._mem_last_write_us is not None
             and anchor_us - self._mem_last_write_us < self._mem_interval_us
         ):
-            return
-        slot = self._net.write_memory(self._net.encode_frames(frame_tensor[:, -1]))[0]
+            return False
+        slot = self._net.write_memory(latest_tokens)[0]
         self._mem_slots.append((slot.cpu(), anchor_us))
         self._mem_last_write_us = anchor_us
         self._mem_updates += 1
+        return True
+
+    def _timer_start(self) -> float | torch.cuda.Event:
+        if self._device.type != "cuda":
+            return perf_counter()
+        event = torch.cuda.Event(enable_timing=True)
+        event.record()
+        return event
+
+    def _timer_end(
+        self, start: float | torch.cuda.Event
+    ) -> float | tuple[torch.cuda.Event, torch.cuda.Event]:
+        if isinstance(start, float):
+            return (perf_counter() - start) * 1000.0
+        end = torch.cuda.Event(enable_timing=True)
+        end.record()
+        return start, end
+
+    @staticmethod
+    def _timer_ms(mark: Any) -> float:
+        if isinstance(mark, float):
+            return mark
+        return float(mark[0].elapsed_time(mark[1]))
 
     def _memory_tensors(self, anchor_us: int) -> tuple[torch.Tensor, torch.Tensor]:
         """memory deque → (1,S,d) tokens + (1,S) 年龄秒（空槽零向量 + PAD_AGE_S）。"""
@@ -201,8 +282,10 @@ class TorchPolicy:
         )
 
 
-def load_torch_policy(checkpoint_dir: str | Path) -> TorchPolicy:
-    """从 checkpoints/<version>/ 加载：meta.json 描述结构参数，model.pt 为权重。
+def load_torch_policy(
+    checkpoint_dir: str | Path, fp16_autocast: bool = False
+) -> TorchPolicy:
+    """加载 model 根目录、final/、epoch-NNN/ 或旧版平铺 checkpoint。
 
     无 "arch": ARCH_TAG 标记的 checkpoint（GRU/LSTM/早期 transformer）
     一律拒绝：legacy / unsupported，不做 silent fallback（spec §16）。
@@ -210,6 +293,17 @@ def load_torch_policy(checkpoint_dir: str | Path) -> TorchPolicy:
     directory = Path(checkpoint_dir)
     if directory.is_file():  # 容忍直接传 meta.json / model.pt 文件路径
         directory = directory.parent
+    if (directory / "final").is_dir():
+        directory = directory / "final"
+    elif not (directory / "model.pt").is_file() and (directory / "meta.json").is_file():
+        summary = ModelCheckpointMeta.load(directory / "meta.json")
+        if not summary.available_epoch_checkpoints:
+            raise FileNotFoundError(f"checkpoint 权重缺失: {directory / 'model.pt'}")
+        available = ", ".join(summary.available_epoch_checkpoints) or "无"
+        raise FileNotFoundError(
+            f"checkpoint 尚未生成 final/: {directory}；已完成 epoch: {available}。"
+            "请显式传入 epochs/epoch-NNN"
+        )
     meta = ModelCheckpointMeta.load(directory / "meta.json")
     cfg = meta.training_config
 
@@ -245,4 +339,4 @@ def load_torch_policy(checkpoint_dir: str | Path) -> TorchPolicy:
     if not weights_path.is_file():
         raise FileNotFoundError(f"checkpoint 权重缺失: {weights_path}")
     net.load_state_dict(torch.load(weights_path, map_location="cpu", weights_only=True))
-    return TorchPolicy(net, meta)
+    return TorchPolicy(net, meta, fp16_autocast=fp16_autocast)

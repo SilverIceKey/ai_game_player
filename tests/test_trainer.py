@@ -6,6 +6,7 @@ checkpoint（model.pt + meta.json）落盘且元数据完整（§29）。
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 
 import pytest
 import torch
@@ -22,6 +23,8 @@ from config import (
 )
 from train.dataset import SessionDataset, build_sample_params, find_session_dirs
 from train.trainer import Trainer
+from model.checkpoint import ModelCheckpointMeta
+from model.policy import load_policy
 from tests.synth_session import make_synthetic_session
 
 _SMALL_TRANSFORMER = TransformerConfig(
@@ -79,9 +82,9 @@ def test_without_torch_raises(tmp_path, monkeypatch) -> None:
 
 
 def test_train_candidate_tiny_overfit(tmp_path, capsys) -> None:
-    """合成数据 2 epoch：loss 下降 + checkpoint 落盘 + meta 五要素齐全。"""
+    """合成数据 3 epoch：每轮不可覆盖，final/root metadata 与加载契约完整。"""
     dataset = _dataset(tmp_path)
-    meta = _trainer().train_candidate(
+    meta = _trainer(TrainingConfig(epochs=3, batch_size=8)).train_candidate(
         dataset,
         dataset_version="dataset-v001",
         model_version="model-v001",
@@ -93,7 +96,7 @@ def test_train_candidate_tiny_overfit(tmp_path, capsys) -> None:
     out_log = capsys.readouterr().out
     assert "[train] 开始训练" in out_log
     assert "batch " in out_log and "samples/s" in out_log  # batch 级进度日志
-    assert "epoch 2/2 done" in out_log
+    assert "epoch 3/3 done" in out_log
 
     history = meta.eval_result["loss_history"]
     assert history[-1]["total"] < history[0]["total"]  # Phase 1：明显拟合趋势
@@ -107,8 +110,37 @@ def test_train_candidate_tiny_overfit(tmp_path, capsys) -> None:
     assert "dependency" in meta.eval_result  # 输入依赖消融
 
     out = tmp_path / "checkpoints" / "model-v001"
-    assert (out / "model.pt").is_file()
     assert (out / "meta.json").is_file()
+    assert (out / "final" / "model.pt").is_file()
+    assert (out / "final" / "meta.json").is_file()
+    epochs = [out / "epochs" / f"epoch-{i:03d}" for i in (1, 2, 3)]
+    assert all((path / "model.pt").is_file() for path in epochs)
+    assert all((path / "meta.json").is_file() for path in epochs)
+    assert len({(path / "model.pt").stat().st_ino for path in epochs}) == 3
+    assert all(
+        len(hashlib.sha256((path / "model.pt").read_bytes()).hexdigest()) == 64
+        for path in epochs
+    )
+
+    for i, path in enumerate(epochs, start=1):
+        epoch_meta = ModelCheckpointMeta.load(path / "meta.json")
+        assert epoch_meta.epoch == i
+        assert set(epoch_meta.train_loss) == {"move", "camera", "button", "temporal"}
+        assert epoch_meta.total_loss is not None
+        assert set(epoch_meta.gate) == {"fast_mean", "fast_std", "slow_mean", "slow_std"}
+        assert epoch_meta.dataset_version == "dataset-v001"
+        assert epoch_meta.code_commit == "deadbeef"
+        assert epoch_meta.created_us > 0
+        assert load_policy(path).model_version == "model-v001"
+
+    assert meta.available_epoch_checkpoints == (
+        "epochs/epoch-001",
+        "epochs/epoch-002",
+        "epochs/epoch-003",
+    )
+    assert meta.selected_epoch == 3
+    assert meta.selection_reason == "last_completed_epoch"
+    assert load_policy(out).model_version == "model-v001"  # 根目录默认解析 final/
 
 
 def test_rejects_empty_versions(tmp_path) -> None:
@@ -118,4 +150,18 @@ def test_rejects_empty_versions(tmp_path) -> None:
         trainer.train_candidate(dataset, " ", "model-v001", checkpoints_dir=tmp_path)
     with pytest.raises(ValueError, match="model_version"):
         trainer.train_candidate(dataset, "dataset-v001", "", checkpoints_dir=tmp_path)
+    dataset.close()
+
+
+def test_existing_model_version_is_never_overwritten(tmp_path) -> None:
+    dataset = _dataset(tmp_path)
+    out = tmp_path / "checkpoints" / "model-v001"
+    out.mkdir(parents=True)
+    sentinel = out / "sentinel"
+    sentinel.write_text("keep", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        _trainer(TrainingConfig(epochs=1, batch_size=8)).train_candidate(
+            dataset, "dataset-v001", "model-v001", checkpoints_dir=tmp_path / "checkpoints"
+        )
+    assert sentinel.read_text(encoding="utf-8") == "keep"
     dataset.close()

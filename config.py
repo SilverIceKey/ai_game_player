@@ -40,6 +40,7 @@ class PredictionConfig:
     action_step_ms: float = 50.0  # spec §13/§15
     future_action_steps: int = 4  # spec §13/§15
     execute_steps: int = 2  # spec §16 Receding Horizon：预测 H 步只执行 execute_steps 步
+    fp16_autocast: bool = False  # CUDA runtime 可选；实机对照通过前默认关闭
 
 
 @dataclass(frozen=True)
@@ -264,6 +265,7 @@ def load_settings(path: str | Path) -> Settings:
         execute_steps=_positive_int(
             prediction.get("execute_steps", 2), "prediction.execute_steps"
         ),
+        fp16_autocast=bool(prediction.get("fp16_autocast", False)),
     )
     if pred.execute_steps > pred.future_action_steps:
         raise ConfigError(
