@@ -2,8 +2,8 @@
 
 ## 当前状态
 
-- AUTOPILOT 语音播报已落地，代码完成、测试全绿，待游戏机实机出声验证。
-- 计划文档：`docs/plans/PLAN-20260814-autopilot-voice-v1.md`（已按确认版本执行）。
+- AUTOPILOT 语音播报已落地；实机发现 Python 3.13 + winsound `SND_MEMORY | SND_ASYNC` 不兼容问题，已修复。
+- 计划文档：`docs/plans/PLAN-20260814-autopilot-voice-v1.md`；进度：本文件。
 
 ## 最近关键结论
 
@@ -20,9 +20,9 @@
 
 ## 验证结果
 
-- 已执行：`.venv/bin/python -m pytest -q` → 335 passed（+10：voice_announcer 文案/节流/事件集成 +
-  config voice 段）；`compileall` 通过；`configs/settings.yaml`（voice.enabled=true）加载实测通过。
-- 未执行：游戏机实机出声（开发机非 249 播放端、无实机输入）；服务端在线时的 /version 探测。
+- 已执行：`.venv/bin/python -m pytest -q` → 335 passed；`compileall` 通过。
+- 实机联调：Windows Python 3.13 运行 `app.autopilot` 触发语音时，`winsound.PlaySound(memory, SND_ASYNC)` 报错 `RuntimeError: Cannot play asynchronously from memory`；已修复为临时文件 + `SND_ASYNC` 播放。
+- 未执行：修复后实机再次出声验证（用户侧进行）。
 
 ## 阻塞项
 
@@ -30,8 +30,9 @@
 
 ## 未证实风险
 
-- Windows 游戏机端 winsound 播放效果与语速未实测；服务端离线时每条播报一次 stderr
-  报错（不刷屏主日志，但决策播报间隔外会持续重试，属预期降级）。
+- Windows 游戏机端 winsound 播放效果与语速已修复（Python 3.13 下临时文件 + SND_ASYNC），
+  待用户再次实机验证出声；服务端离线时每条播报一次 stderr 报错（不刷屏主日志，
+  决策播报间隔外会持续重试，属预期降级）。
 - 决策播报是低层动作摘要，非语义级（"在打 boss"）——模型无场景认知层，语义播报为独立大需求。
 
 ## 下一步动作

@@ -79,13 +79,22 @@ class TTSClient:
             if gen != self._gen:  # 已有更新的 speak，丢弃
                 return
             self._stop_player_locked()
-            self._play(wav)
+            try:
+                self._play(wav)
+            except Exception as e:
+                print(f"[TTSClient] play failed: {e}", file=sys.stderr)
 
     def _play(self, wav):
         if sys.platform == "win32":
             import winsound
 
-            winsound.PlaySound(wav, winsound.SND_MEMORY | winsound.SND_ASYNC)
+            # Python 3.13+ 不支持 SND_MEMORY | SND_ASYNC，必须写临时文件再异步播放。
+            # 文件路径由 _stop_player_locked / 下次 speak 负责清理。
+            f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            f.write(wav)
+            f.close()
+            self._tmp = f.name
+            winsound.PlaySound(f.name, winsound.SND_ASYNC)
             return
         player = shutil.which("aplay") or shutil.which("afplay")
         if not player:
@@ -106,11 +115,14 @@ class TTSClient:
             import winsound
 
             winsound.PlaySound(None, 0)
-            return
-        if self._player is not None:
-            if self._player.poll() is None:
-                self._player.kill()
-            self._player = None
+        else:
+            if self._player is not None:
+                if self._player.poll() is None:
+                    self._player.kill()
+                self._player = None
         if self._tmp is not None:
-            os.unlink(self._tmp)
+            try:
+                os.unlink(self._tmp)
+            except FileNotFoundError:
+                pass
             self._tmp = None

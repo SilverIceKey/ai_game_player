@@ -89,4 +89,8 @@ class VoiceAnnouncer:
         """退出播报：等待请求线程返回（带超时），让最后一句尽量出声。"""
         thread = self._client.speak(text, speed=self._speed, language=self._language,
                                     speaker=self._speaker)
-        thread.join(timeout_s)
+        try:
+            thread.join(timeout_s)
+        except KeyboardInterrupt:
+            # 用户 Ctrl+C 退出时不必等 TTS 返回，继续收尾（writer.close 等）
+            pass
