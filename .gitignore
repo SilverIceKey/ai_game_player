@@ -29,3 +29,5 @@ configs/settings.yaml
 
 # 采集会话数据（视频/动作流，体积大）
 sessions/
+
+checkpoints/
