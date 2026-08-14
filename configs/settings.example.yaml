@@ -74,3 +74,11 @@ audio:                      # 音频模态（spec §8.5，默认关闭；开启�
   mels: 64                  # log-mel 频带数
   fft_size: 400             # STFT 窗长（25ms @16kHz）
   hop_size: 160             # STFT hop（10ms @16kHz）
+
+voice:                      # AUTOPILOT 语音播报（meloTts-server 局域网 TTS，默认关闭）
+  enabled: false            # 接管/恢复/超时/启停事件播报 + 节流决策摘要
+  addr: "192.168.5.249:18103"  # meloTts-server 地址
+  speed: 1.0                # 语速
+  language: ""              # 空 = 服务端默认
+  speaker: ""               # 空 = 服务端默认
+  decision_interval_s: 5.0  # 决策播报节流间隔（秒）；0 = 关闭决策播报

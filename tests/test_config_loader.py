@@ -154,6 +154,44 @@ def test_load_game_config_invalid_rect(tmp_path: Path) -> None:
         load_game_config(path)
 
 
+# ---------- voice 段（PLAN-20260814-autopilot-voice-v1） ----------
+
+
+def test_load_settings_voice_defaults(tmp_path: Path) -> None:
+    settings = load_settings(_write(tmp_path, "game: wukong\n"))
+    assert settings.voice.enabled is False
+    assert settings.voice.addr == "192.168.5.249:18103"
+    assert settings.voice.decision_interval_s == 5.0
+
+
+def test_load_settings_voice_full(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+game: wukong
+voice:
+  enabled: true
+  addr: "10.0.0.2:9000"
+  speed: 1.2
+  language: "ZH"
+  speaker: "default"
+  decision_interval_s: 0
+""",
+    )
+    voice = load_settings(path).voice
+    assert voice.enabled is True
+    assert voice.addr == "10.0.0.2:9000"
+    assert voice.speed == 1.2
+    assert voice.language == "ZH"
+    assert voice.decision_interval_s == 0.0
+
+
+def test_load_settings_voice_enabled_requires_addr(tmp_path: Path) -> None:
+    path = _write(tmp_path, 'game: wukong\nvoice: {enabled: true, addr: ""}\n')
+    with pytest.raises(ConfigError, match="voice.addr"):
+        load_settings(path)
+
+
 # ---------- 仓库真实配置（防 schema 漂移） ----------
 
 

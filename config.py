@@ -80,6 +80,18 @@ class AudioConfig:
 
 
 @dataclass(frozen=True)
+class VoiceConfig:
+    """AUTOPILOT 语音播报（meloTts-server 局域网 TTS，默认关闭）。"""
+
+    enabled: bool = False
+    addr: str = "192.168.5.249:18103"  # meloTts-server 地址（"ip:port" 或 URL）
+    speed: float = 1.0
+    language: str = ""  # 空 = 服务端默认
+    speaker: str = ""  # 空 = 服务端默认
+    decision_interval_s: float = 5.0  # 决策播报节流间隔（秒）；0 = 关闭决策播报
+
+
+@dataclass(frozen=True)
 class TrainingConfig:
     """训练超参（写入 checkpoint meta.training_config，spec §29 可复现）。"""
 
@@ -140,6 +152,7 @@ class Settings:
     transformer: TransformerConfig = TransformerConfig()
     memory: MemoryConfig = MemoryConfig()
     action_history: ActionHistoryConfig = ActionHistoryConfig()
+    voice: VoiceConfig = VoiceConfig()
 
 
 # ---------- 游戏专属配置 ----------
@@ -303,6 +316,7 @@ def load_settings(path: str | Path) -> Settings:
         transformer=_load_transformer(_section(data, "transformer")),
         memory=_load_memory(_section(data, "memory")),
         action_history=_load_action_history(_section(data, "action_history")),
+        voice=_load_voice(_section(data, "voice")),
     )
 
 
@@ -363,6 +377,23 @@ def _load_audio(audio: dict[str, Any]) -> AudioConfig:
         mels=_positive_int(audio.get("mels", 64), "audio.mels"),
         fft_size=_positive_int(audio.get("fft_size", 400), "audio.fft_size"),
         hop_size=_positive_int(audio.get("hop_size", 160), "audio.hop_size"),
+    )
+
+
+def _load_voice(voice: dict[str, Any]) -> VoiceConfig:
+    enabled = bool(voice.get("enabled", False))
+    addr = str(voice.get("addr", "192.168.5.249:18103")).strip()
+    if enabled and not addr:
+        raise ConfigError("voice.enabled=true 时 voice.addr 必须为非空字符串（如 192.168.5.249:18103）")
+    return VoiceConfig(
+        enabled=enabled,
+        addr=addr,
+        speed=_positive_float(voice.get("speed", 1.0), "voice.speed"),
+        language=str(voice.get("language", "")).strip(),
+        speaker=str(voice.get("speaker", "")).strip(),
+        decision_interval_s=_non_negative_float(
+            voice.get("decision_interval_s", 5.0), "voice.decision_interval_s"
+        ),
     )
 
 

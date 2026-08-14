@@ -68,6 +68,7 @@ from runtime.inference import InferenceWorker
 from runtime.preprocess import preprocess_frame
 from runtime.ring_buffer import ActionHistoryBuffer, AudioRingBuffer, FrameRingBuffer
 from runtime.safety_filter import MODE_AI_CONTROL, MODE_HUMAN_OVERRIDE, SafetyFilter
+from runtime.voice_announcer import VoiceAnnouncer, format_action
 
 _PROG = "autopilot"
 
@@ -94,6 +95,7 @@ class AutopilotSession:
         inference_logger: InferenceLogger | None = None,
         scheduler: ActionScheduler | None = None,
         audio_capture: AudioCapture | None = None,
+        announcer: VoiceAnnouncer | None = None,
         frame_queue_size: int = 2,
     ):
         self._settings = settings
@@ -105,6 +107,7 @@ class AutopilotSession:
         self._safety = safety
         self._inference_logger = inference_logger
         self._audio_capture = audio_capture
+        self._announcer = announcer  # 语音播报（可选；失败不抛异常，不影响主链路）
 
         model = settings.model
         self._frame_queue: queue.Queue[tuple[np.ndarray, int]] = queue.Queue(
@@ -281,6 +284,8 @@ class AutopilotSession:
                     f"[{_PROG}] 推理超时 {stats['inference_ms']:.1f}ms > {timeout_ms:g}ms，"
                     "已暂停 AI 并释放输入（spec §47）；按 override 键接管后可恢复"
                 )
+                if self._announcer is not None:
+                    self._announcer.speak("推理超时，AI 已暂停")
             if shadow:
                 self._stop_event.wait(shadow_interval_s)
 
@@ -297,12 +302,16 @@ class AutopilotSession:
                 self._writer.write_marker(MARKER_OVERRIDE_START, timestamp_us)  # §26
             print(f"[{_PROG}] 人工接管（spec §26）：HUMAN_OVERRIDE_START 已标记，"
                   "操作以 source=correction 记录，模型保持 shadow inference")
+            if self._announcer is not None:
+                self._announcer.speak("已接管，交给你了")
         elif mode == MODE_AI_CONTROL:
             self.metrics.start_autonomous(timestamp_us)
             with self._writer_lock:
                 self._writer.write_marker(MARKER_AUTOPILOT_RESUME, timestamp_us)  # §26
             print(f"[{_PROG}] 恢复 AI 控制（spec §26）：AUTOPILOT_RESUME 已标记，"
                   "pending chunk 已清空，基于当前画面重新推理")
+            if self._announcer is not None:
+                self._announcer.speak("恢复 AI 控制")
         self._prev_mode = mode
 
     def _dispatch_loop(self) -> None:
@@ -333,6 +342,9 @@ class AutopilotSession:
                     self._action_history.push(record)  # §8.2：模型输入的动作历史
                     with self._writer_lock:
                         self._writer.write_action(record)
+                    if self._announcer is not None:
+                        # 决策播报（节流在 announcer 内部，此处零成本直通）
+                        self._announcer.speak_decision(format_action(filtered))
             self._stop_event.wait(0.002)
 
     # ---------- 人工输入消费（§26/§27 数据闭环：接管触发 + Correction 记录） ----------
@@ -397,6 +409,8 @@ class AutopilotSession:
             )
         for thread in self._threads:
             thread.start()
+        if self._announcer is not None:
+            self._announcer.speak("自动驾驶已启动")
 
     def wait(self) -> None:
         """阻塞直到停止（Ctrl+C 由调用方捕获后调 stop）。"""
@@ -410,6 +424,8 @@ class AutopilotSession:
             thread.join(timeout=3.0)
         self._executor.release_all()
         self._input_capture.stop()
+        if self._announcer is not None:
+            self._announcer.speak_exit("自动驾驶已退出")
         self.metrics.stop(now_us())
         self._writer.close()  # episode 未结束时自动收尾
         if self._inference_logger is not None:
@@ -534,6 +550,20 @@ def main(argv: list[str] | None = None) -> int:
         on_release=executor.release_all,
         on_clear=scheduler.clear,
     )
+
+    # 语音播报（settings.voice）：服务不可达/播放失败仅 stderr 打印，不影响闭环
+    announcer = None
+    if settings.voice.enabled:
+        from runtime.tts_client import TTSClient
+
+        announcer = VoiceAnnouncer(
+            TTSClient(settings.voice.addr),
+            decision_interval_s=settings.voice.decision_interval_s,
+            speed=settings.voice.speed,
+            language=settings.voice.language,
+            speaker=settings.voice.speaker,
+        )
+
     session = AutopilotSession(
         settings,
         game_config,
@@ -546,11 +576,13 @@ def main(argv: list[str] | None = None) -> int:
         inference_logger=inference_logger,
         scheduler=scheduler,
         audio_capture=audio_capture,
+        announcer=announcer,
     )
 
     print(
         f"[{_PROG}] session={session_dir} game={settings.game} model={policy.model_version} "
-        f"dry_run={args.dry_run} override_key={game_config.safety.override_key}"
+        f"dry_run={args.dry_run} override_key={game_config.safety.override_key} "
+        f"voice={settings.voice.addr if settings.voice.enabled else 'off'}"
     )
     print(f"[{_PROG}] 按 {game_config.safety.override_key} 接管/交还控制；Ctrl+C 退出")
 
